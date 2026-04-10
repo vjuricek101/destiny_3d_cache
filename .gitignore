@@ -1,13 +1,19 @@
-# Compiled Object files
-*.slo
-*.lo
-*.o
+# Simulator binary
+destiny
+obj/
+Makefile.dep
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
+# Generated design space data (Large CSVs)
+exploration_results/
+synthetic_cells/
+temp_configs/
+pareto/
+plots/
 
-# Compiled Static libraries
-*.lai
-*.la
-*.a
+# Python cache
+__pycache__/
+*.pyc
+
+# Temporary files
+tmp_test.cfg
+*.log

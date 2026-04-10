@@ -1,0 +1,41 @@
+# Makefile.exploration for parameterized DESTINY design space exploration
+
+# Memory type (can be SRAM, RRAM, eDRAM, or ALL)
+TYPE ?= ALL
+
+# Parameters
+NUM_VARIANTS ?= 200
+
+# Scripts
+GENERATE_SCRIPT = generate_cells.py
+RUN_SCRIPT = run_exploration.py
+ANALYZE_SCRIPT = pareto_analysis.py
+PLOT_SCRIPT = visualize_pareto.py
+
+.PHONY: all generate explore analyze plot clean clean_all
+
+all: generate explore analyze plot
+
+generate:
+	@echo "--- Step 1: Generating $(NUM_VARIANTS) synthetic variants for $(TYPE) ---"
+	python3 $(GENERATE_SCRIPT) --type $(TYPE) --num_variants $(NUM_VARIANTS)
+
+explore:
+	@echo "--- Step 2: Running parallel simulations for $(TYPE) ---"
+	python3 $(RUN_SCRIPT) --type $(TYPE)
+
+analyze:
+	@echo "--- Step 3: Performing Pareto analysis for $(TYPE) ---"
+	python3 $(ANALYZE_SCRIPT) --type $(TYPE)
+
+plot:
+	@echo "--- Step 4: Generating Pareto visualization for $(TYPE) ---"
+	python3 $(PLOT_SCRIPT)
+
+clean:
+	@echo "Cleaning up temporary configurations for $(TYPE)..."
+	rm -rf temp_configs/$(TYPE)
+
+clean_all:
+	@echo "Cleaning up all generated outputs..."
+	rm -rf synthetic_cells/ temp_configs/ exploration_results/ pareto/
