@@ -98,9 +98,13 @@ def process_results(mem_types):
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             
-        # Save the per-technology aggregated dataset
-        full_space.to_csv(dataset_output, index=False)
-        print(f"[{mem_type}] Saved aggregated dataset.")
+        # Filter for Pareto efficiency within this technology before saving summary
+        tech_costs = full_space[["Cache Hit Latency (ns)", "Cache Area (mm^2)"]].values
+        tech_pareto_mask = is_pareto_efficient(tech_costs)
+        tech_pareto_df = full_space[tech_pareto_mask].copy()
+        
+        tech_pareto_df.to_csv(dataset_output, index=False)
+        print(f"[{mem_type}] Saved {len(tech_pareto_df)} Pareto-optimal designs.")
 
         objective_pairs = [
             ("Cache Hit Latency (ns)", "Cache Leakage Power (mW)"),
