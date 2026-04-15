@@ -27,11 +27,28 @@ def generate_individual_reports(csv_path="pareto/training_dataset_pareto.csv"):
         if not os.path.exists(tech_dir):
             os.makedirs(tech_dir)
 
-        # 1. Area vs Latency (Colored by Capacity)
+        # Determine if we can facet by AccessType (only useful if multiple types exist)
+        facet_col = "CellInput_AccessType" if "CellInput_AccessType" in tech_df.columns else None
+        should_facet = facet_col and tech_df[facet_col].nunique() > 1
+        
+        # 1. Area vs Latency
+        if should_facet:
+            plt.figure(figsize=(14, 8))
+            g = sns.relplot(
+                data=tech_df, x="Cache Hit Latency (ns)", y="Cache Area (mm^2)", 
+                hue="capacity_mb", style=facet_col, col=facet_col,
+                palette="viridis", alpha=0.7, s=100, kind="scatter"
+            )
+            g.set(yscale="log")
+            plt.savefig(os.path.join(tech_dir, "area_vs_latency_faceted.png"), bbox_inches='tight', dpi=300)
+            plt.close()
+        
+        style_col = facet_col if should_facet else None
+        
         plt.figure(figsize=(12, 7))
         sns.scatterplot(
             data=tech_df, x="Cache Hit Latency (ns)", y="Cache Area (mm^2)", 
-            hue="capacity_mb", palette="viridis", alpha=0.7, s=100
+            hue="capacity_mb", style=style_col, palette="viridis", alpha=0.7, s=100
         )
         plt.yscale('log')
         plt.title(f"{tech}: Area vs. Latency", fontsize=14)
@@ -39,11 +56,11 @@ def generate_individual_reports(csv_path="pareto/training_dataset_pareto.csv"):
         plt.savefig(os.path.join(tech_dir, "area_vs_latency.png"), bbox_inches='tight', dpi=300)
         plt.close()
 
-        # 2. Energy vs Latency (Colored by Capacity)
+        # 2. Energy vs Latency
         plt.figure(figsize=(12, 7))
         sns.scatterplot(
             data=tech_df, x="Cache Hit Latency (ns)", y="Cache Hit Energy (nJ)", 
-            hue="capacity_mb", palette="magma", alpha=0.7, s=100
+            hue="capacity_mb", style=style_col, palette="magma", alpha=0.7, s=100
         )
         plt.xscale('log'); plt.yscale('log')
         plt.title(f"{tech}: Energy vs. Latency", fontsize=14)
@@ -51,11 +68,11 @@ def generate_individual_reports(csv_path="pareto/training_dataset_pareto.csv"):
         plt.savefig(os.path.join(tech_dir, "energy_vs_latency.png"), bbox_inches='tight', dpi=300)
         plt.close()
 
-        # 3. Leakage vs Latency (Colored by Capacity)
+        # 3. Leakage vs Latency
         plt.figure(figsize=(12, 7))
         sns.scatterplot(
             data=tech_df, x="Cache Hit Latency (ns)", y="Cache Leakage Power (mW)", 
-            hue="capacity_mb", palette="rocket", alpha=0.7, s=100
+            hue="capacity_mb", style=style_col, palette="rocket", alpha=0.7, s=100
         )
         plt.yscale('log')
         plt.title(f"{tech}: Leakage Power vs. Latency", fontsize=14)

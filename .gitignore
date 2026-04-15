@@ -7,8 +7,8 @@ Makefile.dep
 exploration_results/
 synthetic_cells/
 temp_configs/
-pareto/
-plots/
+
+*.csv
 
 # Python cache
 __pycache__/

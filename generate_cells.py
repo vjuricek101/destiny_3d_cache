@@ -18,7 +18,7 @@ MEMORY_CONFIGS = {
             "SRAMCellPMOSWidth (F)": (1.0, 3.0),
             "AccessCMOSWidth (F)": (1.0, 3.0),
             "CellAspectRatio": (0.8, 2.0),
-            "MinSenseVoltage (mV)": (60, 100)
+            "MinSenseVoltage (mV)": (20, 150)
         }
     },
     "RRAM": {
@@ -42,12 +42,11 @@ MEMORY_CONFIGS = {
             "CellAspectRatio": (0.8, 2.0),
             "AccessCMOSWidth (F)": (1.0, 2.5),
             "DRAMCellCapacitance (F)": (5e-15, 25e-15),
-            "MinSenseVoltage (mV)": (5, 20)
+            "MinSenseVoltage (mV)": (5, 20),
+            "RetentionTime (us)": (10, 150)
         }
     }
 }
-
-
 
 def parse_cell_file(filepath):
     """Parses a DESTINY .cell file into a dictionary of parameters."""
