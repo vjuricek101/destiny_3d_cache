@@ -44,19 +44,18 @@ def run_single_simulation(args):
     with open(cfg_filepath, 'w') as f:
         f.write(new_cfg)
     
-    try:
-        # Run destiny from the root
-        subprocess.run(["./destiny", cfg_filepath], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # Relocate the CSV output
-        expected_csv = os.path.join(temp_dir, f"{variant_name}_cap_{cap_kb}.csv")
-        if os.path.exists(expected_csv):
-            final_csv = os.path.join(results_dir, f"{variant_name}_cap_{cap_kb}.csv")
-            shutil.move(expected_csv, final_csv)
-            return True
+    # Run destiny from the root
+    res = subprocess.run(["./destiny", cfg_filepath], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if res.returncode != 0:
         return False
-    except:
-        return False
+    
+    # Relocate the CSV output
+    expected_csv = os.path.join(temp_dir, f"{variant_name}_cap_{cap_kb}.csv")
+    if os.path.exists(expected_csv):
+        final_csv = os.path.join(results_dir, f"{variant_name}_cap_{cap_kb}.csv")
+        shutil.move(expected_csv, final_csv)
+        return True
+    return False
 
 def generate_and_run(mem_type):
     # Sanity check for binary
@@ -115,4 +114,4 @@ if __name__ == "__main__":
     else:
         generate_and_run(args.type)
         
-    print("\nStep 2 Complete: Architecture Exploration Sweep Done.")
+    print("\nExploration Sweep Done.")

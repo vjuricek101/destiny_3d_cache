@@ -4,15 +4,17 @@
 TYPE ?= ALL
 
 # Parameters
-NUM_VARIANTS ?= 200
+NUM_VARIANTS ?= 2000
 
 # Scripts
 GENERATE_SCRIPT = generate_cells.py
 RUN_SCRIPT = run_exploration.py
 ANALYZE_SCRIPT = pareto_analysis.py
 PLOT_SCRIPT = visualize_pareto.py
+TRAIN_SCRIPT = train_model.py
+VALIDATE_SCRIPT = validate_model.py
 
-.PHONY: all generate explore analyze plot clean clean_all
+.PHONY: all generate explore analyze plot train validate ml_pipeline clean clean_all
 
 all: generate explore analyze plot
 
@@ -32,10 +34,24 @@ plot:
 	@echo "--- Step 4: Generating Pareto visualization for $(TYPE) ---"
 	python3 $(PLOT_SCRIPT)
 
+train:
+	@echo "--- Step 5: Training Surrogate Model for $(TYPE) ---"
+	python3 $(TRAIN_SCRIPT) --tech $(TYPE)
+
+validate:
+	@echo "--- Step 6: Validating Surrogate Model for $(TYPE) ---"
+	python3 $(VALIDATE_SCRIPT) --tech $(TYPE)
+
+ml_pipeline: train validate
+
 clean:
-	@echo "Cleaning up temporary configurations for $(TYPE)..."
+	@echo "--- Cleaning data for $(TYPE) ---"
 	rm -rf temp_configs/$(TYPE)
+	rm -rf exploration_results/$(TYPE)
+	rm -rf pareto/$(TYPE)
+	rm -rf pareto/plots/$(TYPE)
+	rm -rf model_output/$(shell echo $(TYPE) | tr A-Z a-z)
 
 clean_all:
 	@echo "Cleaning up all generated outputs..."
-	rm -rf synthetic_cells/ temp_configs/ exploration_results/ pareto/
+	rm -rf synthetic_cells/ temp_configs/ exploration_results/ pareto/ model_output/

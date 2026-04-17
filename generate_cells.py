@@ -43,7 +43,7 @@ MEMORY_CONFIGS = {
             "AccessCMOSWidth (F)": (1.0, 2.5),
             "DRAMCellCapacitance (F)": (5e-15, 25e-15),
             "MinSenseVoltage (mV)": (5, 20),
-            "RetentionTime (us)": (10, 150)
+            "RetentionTime (us)": (1000, 50000) # 1ms to 50 ms
         }
     }
 }
@@ -141,7 +141,7 @@ def generate_synthetic_cells(mem_type, num_variants):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate synthetic memory cells.")
     parser.add_argument("--type", type=str, default="ALL", help="Memory type (SRAM, RRAM, eDRAM, or ALL)")
-    parser.add_argument("--num_variants", type=int, default=200, help="Number of variants to generate per type")
+    parser.add_argument("--num_variants", type=int, default=2000, help="Number of variants to generate per type")
     args = parser.parse_args()
     
     mem_types = MEMORY_CONFIGS.keys() if args.type == "ALL" else [args.type]
@@ -149,4 +149,4 @@ if __name__ == "__main__":
     for mem in mem_types:
         generate_synthetic_cells(mem, args.num_variants)
         
-    print(f"\nStep 1 Complete: Synthetic Data Generation successful.")
+    print(f"\nSynthetic Cell Generation done.")

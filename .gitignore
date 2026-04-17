@@ -17,3 +17,14 @@ __pycache__/
 # Temporary files
 tmp_test.cfg
 *.log
+
+# Environments
+venv/
+
+# ML Operations & Databases
+optuna_study.db
+model_output/
+
+# Temporary / Misc
+scratch/
+.DS_Store
