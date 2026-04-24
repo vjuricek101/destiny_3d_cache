@@ -24,9 +24,9 @@ plt.rcParams.update({
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 METRICS = [
-    ("Cache Area (mm^2)",         "Area (mm²)",         "log"),
-    ("Cache Hit Energy (nJ)",     "Energy (nJ)",        "log"),
-    ("Cache Leakage Power (mW)",  "Leakage Power (mW)", "log"),
+    ("Cache Area (mm^2)",         "Area",         "log"),
+    ("Cache Hit Energy (nJ)",     "Energy",        "log"),
+    ("Cache Leakage Power (mW)",  "Leakage Power", "log"),
 ]
 LAT_COL   = "Cache Hit Latency (ns)"
 CAP_COL   = "capacity_mb"
@@ -36,7 +36,7 @@ TECHS     = ["SRAM", "RRAM", "eDRAM"]
 # Marker shapes per technology — readable in grayscale/print
 TECH_MARKERS = {"SRAM": "o", "RRAM": "s", "eDRAM": "^"}
 TECH_COLORS  = {"SRAM": "#2196F3", "RRAM": "#E91E63", "eDRAM": "#4CAF50"}
-ACCESS_MARKERS = {"CMOS": "o", "diode": "^", "none": "s"}
+SUB_MARKERS = {"CMOS": "o", "diode": "^", "none": "s", "HP": "o", "LOP": "^", "LSTP": "s", "EDRAM": "o"}
 
 # Power-of-2 capacities 2KB → 32MB, expressed in MB
 CAP_MB = [2**i / 1024 for i in range(-8, 6)]   # 0.002 … 32 MB (approximately)
@@ -53,7 +53,7 @@ CAP_MB_LABELS = {
 
 def pareto_frontier_2d(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
-    Return boolean mask of non-dominated points (minimising both x and y).
+    Return boolean mask of non-dominated points (minimizing both x and y).
     A point is dominated if another point is ≤ in both dimensions and < in at least one.
     """
     n = len(x)
@@ -134,27 +134,33 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
     cmap = plt.cm.viridis
     caps_sorted = sorted(df[CAP_COL].unique())
 
-    has_multi_at = "CellInput_AccessType" in df.columns and df["CellInput_AccessType"].nunique() > 1
+    sub_col = None
+    if "CellInput_AccessType" in df.columns and df["CellInput_AccessType"].nunique() > 1:
+        sub_col = "CellInput_AccessType"
+    elif "DeviceRoadmap" in df.columns and df["DeviceRoadmap"].nunique() > 1:
+        sub_col = "DeviceRoadmap"
 
-    if has_multi_at:
-        access_types = sorted(df["CellInput_AccessType"].dropna().unique())
-        rows = 1 + len(access_types)
+    has_sub_col = sub_col is not None
+
+    if has_sub_col:
+        sub_types = sorted(df[sub_col].dropna().unique())
+        rows = 1 + len(sub_types)
         fig, axes = plt.subplots(rows, 3, figsize=(17, 4.5 * rows), constrained_layout=True)
     else:
         fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), constrained_layout=True)
         axes = np.array([axes])
 
-    fig.suptitle(f"{tech} — Pareto Tradeoffs", fontsize=16 if has_multi_at else 14, fontweight="bold")
+    fig.suptitle(f"{tech} — Pareto Tradeoffs", fontsize=16 if has_sub_col else 14, fontweight="bold")
 
     for i in range(axes.shape[0]):
-        if has_multi_at:
+        if has_sub_col:
             if i == 0:
                 df_row = df.copy()
-                row_title = "All Access Types"
+                row_title = f"All {sub_col.replace('CellInput_', '')}s"
             else:
-                at = access_types[i - 1]
-                df_row = df[df["CellInput_AccessType"] == at].copy()
-                row_title = f"Access: {at}"
+                st = sub_types[i - 1]
+                df_row = df[df[sub_col] == st].copy()
+                row_title = f"{sub_col.replace('CellInput_', '')}: {st}"
         else:
             df_row = df.copy()
             row_title = ""
@@ -163,7 +169,7 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
             ax = axes[i, j]
             
             cols = [LAT_COL, ycol, CAP_COL]
-            if has_multi_at: cols.append("CellInput_AccessType")
+            if has_sub_col: cols.append(sub_col)
             sub = df_row[cols].dropna(subset=[LAT_COL, ycol, CAP_COL])
             
             if sub.empty:
@@ -174,13 +180,13 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
             y = sub[ycol].values
 
             # Scatter: all points coloured by capacity
-            if has_multi_at:
-                for row_at in sorted(sub["CellInput_AccessType"].dropna().unique()):
-                    at_mask = sub["CellInput_AccessType"] == row_at
-                    if at_mask.sum() == 0: continue
-                    ax.scatter(x[at_mask], y[at_mask],
-                               c=sub[CAP_COL].values[at_mask], norm=norm, cmap=cmap,
-                               marker=ACCESS_MARKERS.get(row_at, "o"),
+            if has_sub_col:
+                for row_st in sorted(sub[sub_col].dropna().unique()):
+                    st_mask = sub[sub_col] == row_st
+                    if st_mask.sum() == 0: continue
+                    ax.scatter(x[st_mask], y[st_mask],
+                               c=sub[CAP_COL].values[st_mask], norm=norm, cmap=cmap,
+                               marker=SUB_MARKERS.get(row_st, "o"),
                                s=35, alpha=0.65, linewidths=0, zorder=3)
             else:
                 ax.scatter(x, y,
@@ -215,11 +221,11 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
     add_cap_colorbar(fig, list(axes.flatten()), norm)
     
     # Legend on the first axes
-    if has_multi_at:
-        handles = [Line2D([0],[0], marker=ACCESS_MARKERS.get(at, "o"), color="w", 
-                          markerfacecolor="gray", markersize=7, label=at)
-                   for at in access_types]
-        axes[0, 0].legend(handles=handles, title="AccessType", fontsize=8, loc="upper left")
+    if has_sub_col:
+        handles = [Line2D([0],[0], marker=SUB_MARKERS.get(st, "o"), color="w", 
+                          markerfacecolor="gray", markersize=7, label=st)
+                   for st in sub_types]
+        axes[0, 0].legend(handles=handles, title=sub_col.replace('CellInput_', ''), fontsize=8, loc="upper left")
 
     path = os.path.join(out_dir, "tradeoffs_3panel.png")
     fig.savefig(path, dpi=200, bbox_inches="tight")
@@ -243,57 +249,67 @@ def plot_dominated_vs_pareto(tech: str, df_full: pd.DataFrame,
     norm = LogNorm(vmin=all_caps.min(), vmax=all_caps.max())
     cmap = plt.cm.viridis
 
-    has_multi_at = "CellInput_AccessType" in df_p.columns and df_p["CellInput_AccessType"].nunique() > 1
-    if has_multi_at:
-        access_types = sorted(df_p["CellInput_AccessType"].dropna().unique())
-        rows = 1 + len(access_types)
+    sub_col = None
+    if "CellInput_AccessType" in df_p.columns and df_p["CellInput_AccessType"].nunique() > 1:
+        sub_col = "CellInput_AccessType"
+    elif "DeviceRoadmap" in df_p.columns and df_p["DeviceRoadmap"].nunique() > 1:
+        sub_col = "DeviceRoadmap"
+
+    has_sub_col = sub_col is not None
+    if has_sub_col:
+        sub_types = sorted(df_p[sub_col].dropna().unique())
+        rows = 1 + len(sub_types)
         fig, axes = plt.subplots(rows, 3, figsize=(17, 4.5 * rows), constrained_layout=True)
     else:
         fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), constrained_layout=True)
         axes = np.array([axes])  # Make 2D for consistent indexing
 
     fig.suptitle(f"{tech} — Full Design Space vs Pareto Frontier", 
-                 fontsize=16 if has_multi_at else 14, fontweight="bold")
+                 fontsize=16 if has_sub_col else 14, fontweight="bold")
 
     for i in range(axes.shape[0]):
-        if has_multi_at:
+        if has_sub_col:
             if i == 0:
                 df_p_row = df_p.copy()
-                row_title = "All Access Types"
+                df_f_row = df_f.copy()
+                row_title = f"All {sub_col.replace('CellInput_', '')}s"
             else:
-                at = access_types[i - 1]
-                df_p_row = df_p[df_p["CellInput_AccessType"] == at].copy()
-                row_title = f"Access: {at}"
+                st = sub_types[i - 1]
+                df_p_row = df_p[df_p[sub_col] == st].copy()
+                df_f_row = df_f[df_f[sub_col] == st].copy()
+                row_title = f"{sub_col.replace('CellInput_', '')}: {st}"
         else:
             df_p_row = df_p.copy()
+            df_f_row = df_f.copy()
             row_title = ""
 
         for j, (ycol, ylabel, yscale) in enumerate(METRICS):
             ax = axes[i, j]
-            valid_f = df_f[[LAT_COL, ycol, CAP_COL]].dropna()
             
             # Sub-select columns safely
             cols = [LAT_COL, ycol, CAP_COL]
-            if has_multi_at: cols.append("CellInput_AccessType")
+            if has_sub_col: cols.append(sub_col)
+            
+            valid_f = df_f_row[cols].dropna(subset=[LAT_COL, ycol, CAP_COL])
             valid_p_row = df_p_row[cols].dropna(subset=[LAT_COL, ycol, CAP_COL])
             
             if valid_f.empty or valid_p_row.empty:
                 ax.set_visible(False)
                 continue
 
-            # Dominated cloud: full design space ALWAYS shown in background
+            # Dominated cloud: Full design space ALWAYS shown in background
             ax.scatter(valid_f[LAT_COL], valid_f[ycol],
                        c=valid_f[CAP_COL], norm=norm, cmap=cmap,
                        s=14, alpha=0.15, linewidths=0, zorder=1)
 
-            # Pareto-optimal points for THIS row
-            if has_multi_at:
-                for row_at in sorted(valid_p_row["CellInput_AccessType"].dropna().unique()):
-                    at_mask = valid_p_row["CellInput_AccessType"] == row_at
-                    if at_mask.sum() == 0: continue
-                    ax.scatter(valid_p_row[LAT_COL][at_mask], valid_p_row[ycol][at_mask],
-                               c=valid_p_row[CAP_COL][at_mask], norm=norm, cmap=cmap,
-                               marker=ACCESS_MARKERS.get(row_at, "o"),
+            # Pareto-optimal points for this row
+            if has_sub_col:
+                for row_st in sorted(valid_p_row[sub_col].dropna().unique()):
+                    st_mask = valid_p_row[sub_col] == row_st
+                    if st_mask.sum() == 0: continue
+                    ax.scatter(valid_p_row[LAT_COL][st_mask], valid_p_row[ycol][st_mask],
+                               c=valid_p_row[CAP_COL][st_mask], norm=norm, cmap=cmap,
+                               marker=SUB_MARKERS.get(row_st, "o"),
                                s=65, alpha=0.95, edgecolors="k", linewidths=0.5, zorder=3)
             else:
                 ax.scatter(valid_p_row[LAT_COL], valid_p_row[ycol],
@@ -320,10 +336,10 @@ def plot_dominated_vs_pareto(tech: str, df_full: pd.DataFrame,
                markersize=9, markeredgecolor="k", markeredgewidth=0.5,
                label="Pareto-optimal"),
     ]
-    if has_multi_at:
-        for at in access_types:
-            legend_handles.append(Line2D([0], [0], marker=ACCESS_MARKERS.get(at, "o"), 
-                                         color="w", markerfacecolor="k", markersize=6, label=f"Access: {at}"))
+    if has_sub_col:
+        for st in sub_types:
+            legend_handles.append(Line2D([0], [0], marker=SUB_MARKERS.get(st, "o"), 
+                                         color="w", markerfacecolor="k", markersize=6, label=f"{sub_col.replace('CellInput_', '')}: {st}"))
 
     axes[0, 0].legend(handles=legend_handles, fontsize=8, loc="upper left")
 

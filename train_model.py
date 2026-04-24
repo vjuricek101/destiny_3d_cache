@@ -4,17 +4,6 @@ train_model.py — DESTINY surrogate ML model
 
 Trains MLP to predict (Latency, Area, Energy, Leakage Power) 
 Inputs and outputs are both log10-transformed
-
-Usage:
-    python3 train_model.py
-    python3 train_model.py --data pareto/pareto.csv --epochs 300
-    python3 train_model.py --output-dir my_model --batch-size 128 --lr 5e-4
-
-Outputs saved to --output-dir (default: model_output/):
-    model.pt          PyTorch state dict
-    scaler.pkl        Fitted StandardScaler
-    feature_cols.json Ordered list of feature column names after preprocessing
-    training_log.csv  Epoch-by-epoch train/val loss
 """
 
 import argparse
@@ -23,6 +12,7 @@ import os
 import pickle
 import sys
 import warnings
+import optuna
 
 import numpy as np
 import pandas as pd
@@ -48,6 +38,7 @@ DROP_COLS = ["variant_id", "CellInput_MemCellType"]
 
 CATEGORICAL_COLS = [
     "memory_technology",
+    "DeviceRoadmap",
     "CellInput_AccessType",
     "CellInput_ReadMode",
     "CellInput_ResetMode",
@@ -83,6 +74,25 @@ LOG_NUMERIC_COLS = [
     "CellInput_ResetEnergy (pJ)",
     "CellInput_SetEnergy (pJ)",
 ]
+
+# Swept .cfg architectural parameters — log2-transformed (power-of-2 knobs).
+# word_width and associativity come from SRAM/eDRAM cache-mode sweeps;
+# stacked_die_count from all technologies.
+# internal_sensing is a binary flag from RRAM sweeps (0 or 1, kept as-is).
+LOG2_CFG_COLS = [
+    "word_width",
+    "associativity",
+    "stacked_die_count",
+]
+# Binary cfg param — just passthrough (already 0/1).
+BINARY_CFG_COLS = ["internal_sensing"]
+
+# Other numeric inputs that scale linearly (e.g., ProcessNode, Temperature)
+LINEAR_NUMERIC_COLS = [
+    "Temperature (K)",
+    "CellInput_ProcessNode"
+]
+
 
 # Columns irrelevant to each specific technology (beyond the shared DROP_COLS).
 _RRAM_SRAM_SHARED_DROPS = [
@@ -151,24 +161,14 @@ def build_features(df: pd.DataFrame, extra_drop_cols: list = None) -> pd.DataFra
         df[force_cols] = df[force_cols].apply(pd.to_numeric, errors="coerce")
 
     # Derived features
-    if "capacity_mb" in df.columns:
-        df["derived_sqrt_capacity"] = np.sqrt(pd.to_numeric(df["capacity_mb"], errors="coerce").fillna(0))
-    if "CellInput_CellArea (F^2)" in df.columns:
-        df["derived_sqrt_area"] = np.sqrt(pd.to_numeric(df["CellInput_CellArea (F^2)"], errors="coerce").fillna(0))
-    if "CellInput_ReadVoltage (V)" in df.columns:
-        rv = pd.to_numeric(df["CellInput_ReadVoltage (V)"], errors="coerce").fillna(0)
-        df["derived_read_voltage_sq"] = rv ** 2
-    if {"CellInput_SRAMCellNMOSWidth (F)", "CellInput_SRAMCellPMOSWidth (F)"} <= set(df.columns):
-        n = pd.to_numeric(df["CellInput_SRAMCellNMOSWidth (F)"], errors="coerce").fillna(1)
-        p = pd.to_numeric(df["CellInput_SRAMCellPMOSWidth (F)"], errors="coerce").fillna(1)
-        df["derived_beta_ratio"] = np.log10(n / (p + 1e-12))
-    if {"CellInput_AccessCMOSWidth (F)", "CellInput_SRAMCellNMOSWidth (F)"} <= set(df.columns):
-        a = pd.to_numeric(df["CellInput_AccessCMOSWidth (F)"], errors="coerce").fillna(1)
-        n = pd.to_numeric(df["CellInput_SRAMCellNMOSWidth (F)"], errors="coerce").fillna(1)
-        df["derived_access_ratio"] = np.log10(a / (n + 1e-12))
-    if "CellInput_RetentionTime (us)" in df.columns:
-        rt = pd.to_numeric(df["CellInput_RetentionTime (us)"], errors="coerce")
-        df["derived_refresh_rate_hz"] = np.where(rt > 0, np.log10(1e6 / rt), 0.0)
+    derived = {
+        "derived_sqrt_capacity": lambda d: np.sqrt(d["capacity_mb"]) if "capacity_mb" in d else None,
+        "derived_sqrt_area":     lambda d: np.sqrt(d["CellInput_CellArea (F^2)"]) if "CellInput_CellArea (F^2)" in d else None,
+        "derived_read_v_sq":     lambda d: d["CellInput_ReadVoltage (V)"]**2 if "CellInput_ReadVoltage (V)" in d else None,
+    }
+    for name, func in derived.items():
+        res = func(df)
+        if res is not None: df[name] = pd.to_numeric(res, errors="coerce").fillna(0)
 
     drop_list = set(TARGET_COLS + DROP_COLS + (extra_drop_cols or []))
     df = df[[c for c in df.columns if c not in drop_list]]
@@ -180,6 +180,22 @@ def build_features(df: pd.DataFrame, extra_drop_cols: list = None) -> pd.DataFra
     if log_cols:
         df[log_cols] = df[log_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
         df[log_cols] = np.where(df[log_cols] > 0, np.log10(df[log_cols].clip(lower=1e-12)), 0.0)
+
+    # Log2-transform power-of-2 cfg knobs (word_width, associativity, stacked_die_count)
+    log2_cols = [c for c in LOG2_CFG_COLS if c in df.columns]
+    if log2_cols:
+        df[log2_cols] = df[log2_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+        df[log2_cols] = np.where(df[log2_cols] > 0, np.log2(df[log2_cols].clip(lower=1)), 0.0)
+
+    # Binary cfg params — coerce to numeric (already 0/1)
+    bin_cols = [c for c in BINARY_CFG_COLS if c in df.columns]
+    if bin_cols:
+        df[bin_cols] = df[bin_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+
+    # Coerce linear specific mappings to ensure float types
+    lin_cols = [c for c in LINEAR_NUMERIC_COLS if c in df.columns]
+    if lin_cols:
+        df[lin_cols] = df[lin_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
 
     return df.fillna(0).astype(np.float32)
 
@@ -211,12 +227,13 @@ def prepare_data(args):
             print(f"Sub-sampled to {args.sample_size} rows.")
 
     # Stratified 80/10/10 split
-    tech_labels = df_raw["memory_technology"].values
+    def split(indices, size, strat):
+        return train_test_split(indices, test_size=size, random_state=42, stratify=strat)
+
     idx = np.arange(len(df_raw))
-    idx_trainval, idx_test = train_test_split(idx, test_size=0.10, random_state=42, stratify=tech_labels)
-    idx_train, idx_val = train_test_split(
-        idx_trainval, test_size=0.111, random_state=42, stratify=tech_labels[idx_trainval]
-    )
+    strat = df_raw["memory_technology"].values
+    iv, idx_test = split(idx, 0.1, strat)
+    idx_train, idx_val = split(iv, 0.111, strat[iv])
     print(f"\nSplit: {len(idx_train)} train / {len(idx_val)} val / {len(idx_test)} test")
 
     # Feature engineering
@@ -369,12 +386,15 @@ def train(args, trial=None):
 
     for epoch in range(1, args.epochs + 1):
         model.train()
-        train_loss = sum(
-            (lambda loss: (loss.backward(), optimizer.step(), loss.item() * len(xb))[2])(
-                (optimizer.zero_grad() or criterion(model(xb.to(device)), yb.to(device)))
-            )
-            for xb, yb in train_loader
-        ) / len(X_train)
+        total_train_loss = 0
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            optimizer.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            optimizer.step()
+            total_train_loss += loss.item() * len(xb)
+        train_loss = total_train_loss / len(X_train)
 
         model.eval()
         with torch.no_grad():
@@ -430,7 +450,6 @@ def parse_args(args=None):
         description="Train DESTINY PPA surrogate model",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--data",         default=None,          help="Path to training CSV.")
     p.add_argument("--output-dir",   default="model_output", help="Directory for saved artifacts.")
     p.add_argument("--tech",         default="ALL",          help="Filter to one memory technology (SRAM, RRAM, eDRAM).")
     p.add_argument("--epochs",       type=int,   default=300)
@@ -444,15 +463,29 @@ def parse_args(args=None):
     p.add_argument("--log-interval", type=int,   default=20)
     p.add_argument("--alpha", type=float, nargs=4, default=[1.5, 1.0, 3.0, 1.0],
                    help="Loss weights for [Latency, Area, Energy, Leakage].")
+    p.add_argument("--from-study", default=None, help="Load optimized hyperparameters from an Optuna study.")
     return p.parse_args(args)
 
 
+def load_params_from_study(args):
+    if not args.from_study: return
+    db = "sqlite:///optuna_study.db"
+    try:
+        best = optuna.load_study(study_name=args.from_study, storage=db).best_params
+        print(f"\n[INFO] Loading optimized parameters from: {args.from_study}")
+        for k in ["hidden_dim", "n_blocks", "lr", "dropout"]:
+            if k in best: setattr(args, k, best[k])
+        if "alpha_lat" in best:
+            args.alpha = [best.get(f"alpha_{m}", 1.0) for m in ["lat", "area", "energy", "leak"]]
+    except Exception as e:
+        print(f"  [WARNING] Study '{args.from_study}' load failed: {e}")
+
 if __name__ == "__main__":
     args = parse_args()
+    load_params_from_study(args)
 
-    if args.data is None:
-        args.data = (f"pareto/{args.tech}/{args.tech}_full_data.csv"
-                     if args.tech != "ALL" else "pareto/full_data.csv")
+    args.data = (f"pareto/{args.tech}/{args.tech}_full_data.csv"
+                 if args.tech != "ALL" else "pareto/full_data.csv")
 
     if args.output_dir == "model_output":
         suffix = "_full" if args.data and "full" in args.data else ""

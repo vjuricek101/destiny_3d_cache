@@ -1,25 +1,14 @@
+#!/usr/bin/env python3
 import os
+import re
+import argparse
 import pandas as pd
 import numpy as np
-import argparse
+from pathlib import Path
 
-def _pareto_2d_fast(costs):
-    """O(n log n) Pareto frontier for 2 objectives."""
-    n = costs.shape[0]
-    if n == 0: return np.array([], dtype=bool)
-    sort_idx = np.lexsort((costs[:, 1], costs[:, 0]))
-    sorted_costs = costs[sort_idx]
-    is_efficient_sorted = np.zeros(n, dtype=bool)
-    min_obj1 = np.inf
-    for i in range(n):
-        if sorted_costs[i, 1] < min_obj1:
-            is_efficient_sorted[i] = True
-            min_obj1 = sorted_costs[i, 1]
-    is_efficient = np.zeros(n, dtype=bool)
-    is_efficient[sort_idx] = is_efficient_sorted
-    return is_efficient
+# ── Pareto Algorithms ──────────────────────────────────────────────────────────
 
-def _pareto_nd_general(costs):
+def is_pareto_efficient(costs):
     """O(n^2) Pareto frontier for N objectives."""
     n = costs.shape[0]
     is_efficient = np.ones(n, dtype=bool)
@@ -27,117 +16,133 @@ def _pareto_nd_general(costs):
         if not is_efficient[i]: continue
         others = costs[is_efficient]
         dominated = (np.all(others <= costs[i], axis=1) & np.any(others < costs[i], axis=1))
-        # Mask self
         efficient_indices = np.where(is_efficient)[0]
         self_pos = np.where(efficient_indices == i)[0][0]
         dominated[self_pos] = False
         if np.any(dominated): is_efficient[i] = False
     return is_efficient
 
-def is_pareto_efficient(costs):
-    """Dispatches to the fastest correct Pareto algorithm based on dimension."""
-    if costs.shape[0] == 0: return np.array([], dtype=bool)
-    return _pareto_2d_fast(costs) if costs.shape[1] == 2 else _pareto_nd_general(costs)
+# ── Utility Functions ─────────────────────────────────────────────────────────
 
 def parse_cell_file(filepath):
-    """Extract cell parameters from .cell file."""
+    """Extract CellInput_ parameters from .cell file."""
     params = {}
-    if not os.path.exists(filepath):
-        return params
+    if not os.path.exists(filepath): return params
     with open(filepath, 'r') as f:
         for line in f:
-            if not line.startswith('-'):
-                continue
+            if not line.startswith('-'): continue
             parts = line[1:].split(':', 1)
-            if len(parts) != 2:
-                continue
-            k, v = parts
-            val = v.strip()
-            try:
-                val = float(val)
-            except ValueError:
-                pass
-            params[f"CellInput_{k.strip()}"] = val
+            if len(parts) == 2:
+                params[f"CellInput_{parts[0].strip()}"] = pd.to_numeric(parts[1].strip(), errors='ignore')
     return params
 
-OBJECTIVE_PAIRS = [
-    ("Cache Hit Latency (ns)", "Cache Area (mm^2)"),
-    ("Cache Hit Latency (ns)", "Cache Hit Energy (nJ)"),
-    ("Cache Hit Latency (ns)", "Cache Leakage Power (mW)"),
-]
+def parse_metadata(stem, tech, is_arch=False):
+    """Extracts swept parameters from simulation output filenames."""
+    meta = {'memory_technology': tech}
+    
+    # Common mappings
+    mappings = {'cap_kb': r'_cap_(\d+)', 'word_width': r'_ww(\d+)', 
+                'associativity': r'_a(\d+)', 'stacked_die_count': r'_s(\d+)', 
+                'roadmap': r'_rm_([A-Z]+)'}
+    
+    # Specific mappings
+    if is_arch:
+        mappings['Temperature (K)'] = r'_t(\d+)'
+    else:
+        mappings['variant_id'] = r'variant_(\d+)'
+        # For standard runs, temperature is derived from stack count (Level 4)
+        m = re.search(r'_s(\d+)', stem)
+        if m:
+            temp_map = {"SRAM": {1: 350, 2: 363, 4: 380}, "eDRAM": {1: 350, 2: 363, 4: 380}, "RRAM": {1: 313, 2: 333, 4: 358}}
+            stack = int(m.group(1))
+            if tech in temp_map and stack in temp_map[tech]:
+                meta['Temperature (K)'] = temp_map[tech][stack]
 
-def _load_simulation_csv(results_dir, csv_file, mem_type):
-    """Load PPA data and attach variant parameters."""
-    path = os.path.join(results_dir, csv_file)
+    for key, pattern in mappings.items():
+        m = re.search(pattern, stem)
+        if m: meta[key] = m.group(1)
+        
+    if 'cap_kb' in meta: meta['capacity_mb'] = float(meta['cap_kb']) / 1024.0
+    return meta
+
+# ── Data Loading ──────────────────────────────────────────────────────────────
+
+def load_sim_csv(results_path, tech, is_arch=False):
+    """Loads a single simulation CSV and attaches metadata/cell physics."""
     try:
-        # Detect format (Cache >= 90 cols, RAM < 90)
-        first = pd.read_csv(path, header=None, nrows=1, skipinitialspace=True)
-        is_cache = len(first.columns) >= 90
+        df_raw = pd.read_csv(results_path, header=None, skipinitialspace=True)
+        is_cache = len(df_raw.columns) >= 90
         cols = [1,2,6,10] if is_cache else [24,32,35,38]
-        df = pd.read_csv(path, header=None, usecols=cols, skipinitialspace=True)
+        
+        df = df_raw.iloc[:, cols].copy()
+        df.columns = ["Cache Area (mm^2)", "Cache Hit Latency (ns)", "Cache Hit Energy (nJ)", "Cache Leakage Power (mW)"]
         if not is_cache: df.iloc[:, 2] /= 1000.0 # pJ -> nJ
         
-        df.columns = ["Cache Area (mm^2)", "Cache Hit Latency (ns)", "Cache Hit Energy (nJ)", "Cache Leakage Power (mW)"]
+        meta = parse_metadata(Path(results_path).stem, tech, is_arch)
+        for k, v in meta.items(): df[k] = v
         
-        p = csv_file.replace('.csv', '').split('_')
-        df['memory_technology'], df['variant_id'], df['capacity_mb'] = mem_type, int(p[2]), float(p[4])/1024.0
+        # Resolve cell physics path
+        m = re.search(r'_n(\d+)', results_path)
+        node = m.group(1) if m else "32"
         
-        for k, v in parse_cell_file(f"synthetic_cells/{mem_type}/synthetic_variant_{p[2]}.cell").items():
-            df[k] = v
-
-        # Local Pareto filter to save memory
-        ppa = df[["Cache Hit Latency (ns)", "Cache Area (mm^2)"]].dropna()
-        return df.loc[ppa.index[is_pareto_efficient(ppa.values)]] if not ppa.empty else df
+        if is_arch:
+            cell_path = f"synthetic_cells/{tech}_arch/arch_variant_nominal_n{node}.cell"
+        else:
+            cell_path = f"synthetic_cells/{tech}/synthetic_variant_{meta.get('variant_id')}_n{node}.cell"
+            
+        for k, v in parse_cell_file(cell_path).items(): df[k] = v
+        return df
     except Exception:
         return None
 
-def process_results(mem_types, only_full=False):
-    """Orchestrate the Pareto extraction and universal merge.
-    Outputs written:
-      pareto/{tech}/{tech}_cap_{X}_pareto.csv     one file per capacity point
-      pareto/{tech}/{tech}_pareto.csv  union across all capacities
-      pareto/pareto.csv               union across all technologies
-    """
-    for mt in mem_types:
-        r_dir, o_dir = f"exploration_results/{mt}", f"pareto/{mt}"
-        if not os.path.exists(r_dir): continue
-        
-        files = [f for f in os.listdir(r_dir) if f.endswith('.csv')]
-        if not files: continue
+# ── Orchestration ─────────────────────────────────────────────────────────────
 
-        print(f"Processing {mt} ({len(files)} files)...")
-        frames = [_load_simulation_csv(r_dir, f, mt) for f in files]
-        full = pd.concat([f for f in frames if f is not None], ignore_index=True).dropna(axis=1, how='all')
-        
-        os.makedirs(o_dir, exist_ok=True)
-        full.to_csv(os.path.join(o_dir, f"{mt}_full_data.csv"), index=False)
-        if only_full: continue
+def process_results(tech, is_arch, only_full):
+    suffix = "_arch" if is_arch else ""
+    res_dir = Path(f"exploration_results/{tech}{suffix}")
+    if not res_dir.exists(): return
+    
+    csv_files = list(res_dir.glob("*.csv"))
+    if not csv_files: return
 
-        tech_sets = []
-        for cap in sorted(full['capacity_mb'].unique()):
-            c_df = full[full['capacity_mb'] == cap]
-            p_rows = [c_df[is_pareto_efficient(c_df[[x,y]].values)] for x,y in OBJECTIVE_PAIRS if x in c_df and y in c_df]
-            if not p_rows: continue
-            cap_p = pd.concat(p_rows).drop_duplicates()
-            cap_p.to_csv(os.path.join(o_dir, f"{mt}_cap_{str(cap).replace('.','_')}_pareto.csv"), index=False)
-            tech_sets.append(cap_p)
+    print(f"Aggregating {tech}{suffix} ({len(csv_files)} files)...")
+    dfs = [load_sim_csv(str(f), tech, is_arch) for f in csv_files]
+    full_df = pd.concat([d for d in dfs if d is not None], ignore_index=True)
+    
+    out_dir = Path(f"pareto/{tech}{suffix}")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    full_df.to_csv(out_dir / f"{tech}{suffix}_full_data.csv", index=False)
+    
+    if only_full: return
 
-        if tech_sets:
-            pd.concat(tech_sets).drop_duplicates().to_csv(os.path.join(o_dir, f"{mt}_pareto.csv"), index=False)
-
-    # Universal Merge
-    all_p = []
-    for t in ["SRAM", "RRAM", "eDRAM"]:
-        tp = os.path.join("pareto", t, f"{t}_pareto.csv")
-        if os.path.exists(tp): all_p.append(pd.read_csv(tp))
-            
-    if all_p:
-        os.makedirs('pareto', exist_ok=True)
-        pd.concat(all_p, ignore_index=True).drop_duplicates().to_csv("pareto/pareto.csv", index=False)
+    # Calculation logic for filters
+    ppa_cols = ["Cache Hit Latency (ns)", "Cache Area (mm^2)"]
+    pareto_frames = []
+    
+    print(f"  Calculating Pareto frontiers...")
+    for cap, group in full_df.groupby('capacity_mb'):
+        costs = group[ppa_cols].values
+        p_df = group[is_pareto_efficient(costs)]
+        p_df.to_csv(out_dir / f"{tech}{suffix}_cap_{str(cap).replace('.','_')}_pareto.csv", index=False)
+        pareto_frames.append(p_df)
+    
+    if pareto_frames:
+        pd.concat(pareto_frames).to_csv(out_dir / f"{tech}{suffix}_pareto.csv", index=False)
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--type", default="ALL")
-    p.add_argument("--only-full", action="store_true")
-    args = p.parse_args()
-    process_results(["SRAM", "RRAM", "eDRAM"] if args.type == "ALL" else [args.type], args.only_full)
+    parser = argparse.ArgumentParser(description="Unified Pareto Analysis Core")
+    parser.add_argument("--type", default="ALL", choices=["SRAM", "RRAM", "eDRAM", "ALL"])
+    parser.add_argument("--arch", action="store_true", help="Process architectural sweep results (_arch)")
+    parser.add_argument("--only-full", action="store_true", help="Only generate the full merged CSV, skip Pareto filtering")
+    args = parser.parse_args()
+    
+    techs = ["SRAM", "RRAM", "eDRAM"] if args.type == "ALL" else [args.type]
+    for t in techs:
+        process_results(t, args.arch, args.only_full)
+    
+    # Unified Global Merge
+    all_p = [pd.read_csv(f) for f in Path("pareto").glob("*/*_pareto.csv") if "cap" not in f.name]
+    if all_p:
+        print("\nCreating final unified Pareto CSV...")
+        pd.concat(all_p, ignore_index=True).drop_duplicates().to_csv("pareto/pareto.csv", index=False)
+    print("Done.")

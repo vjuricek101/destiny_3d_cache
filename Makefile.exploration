@@ -1,57 +1,144 @@
 # Makefile.exploration for parameterized DESTINY design space exploration
 
-# Memory type (can be SRAM, RRAM, eDRAM, or ALL)
+# --- Configuration ---
+# Mode: standard (mixed physics) or arch (fixed-physics architectural sweep)
+MODE ?= standard
+# Memory type: SRAM, RRAM, eDRAM, or ALL
 TYPE ?= ALL
-
-# Parameters
+# Number of variants to generate per technology (only applies to standard mode)
 NUM_VARIANTS ?= 2000
+# Technologies handled by the ALL logic
+TECHS = SRAM RRAM eDRAM
 
-# Scripts
-GENERATE_SCRIPT = generate_cells.py
-RUN_SCRIPT = run_exploration.py
-ANALYZE_SCRIPT = pareto_analysis.py
-PLOT_SCRIPT = visualize_pareto.py
-TRAIN_SCRIPT = train_model.py
-VALIDATE_SCRIPT = validate_model.py
+# --- Paths ---
+RAM_DIR = /dev/shm/vjuricek_destiny_tmp
 
-.PHONY: all generate explore analyze plot train validate ml_pipeline clean clean_all
+# --- Script Logic (Switches based on MODE) ---
+ifeq ($(MODE), arch)
+	GENERATE_SCRIPT = generate_cells_arch.py
+	EXPLORE_SCRIPT  = run_exploration_arch.py
+	ANALYZE_SCRIPT  = pareto_analysis.py
+	TUNE_SCRIPT     = tune_model.py
+	PLOT_SCRIPT     = visualize_pareto_arch.py
+	TRAIN_SCRIPT    = train_model_arch.py
+	INV_DESIGN_SCRIPT = inverse_design.py
+	SUFFIX = _arch
+	ARCH_FLAG = --arch
+else
+	GENERATE_SCRIPT = generate_cells.py
+	EXPLORE_SCRIPT  = run_exploration.py
+	ANALYZE_SCRIPT  = pareto_analysis.py
+	TUNE_SCRIPT     = tune_model.py
+	PLOT_SCRIPT     = visualize_pareto.py
+	TRAIN_SCRIPT    = train_model.py
+	INV_DESIGN_SCRIPT = inverse_design.py
+	SUFFIX =
+	ARCH_FLAG =
+endif
 
-all: generate explore analyze plot
+VALIDATE_SCRIPT  = validate_model.py
+
+# --- Main Targets ---
+.PHONY: help all exploration generate explore analyze plot train validate ml_pipeline clean clean_all
+
+help:
+	@echo "DESTINY Exploration Pipeline"
+	@echo "Usage: make -f Makefile.exploration [target] [MODE=standard|arch] [TYPE=SRAM|RRAM|eDRAM|ALL]"
+	@echo ""
+	@echo "Modes:"
+	@echo "  standard    Full-stack sweep (Arch + Physics), uses random sampling."
+	@echo "  arch        Architectural sweep (Fixed Physics), uses Cartesian grid."
+	@echo ""
+	@echo "Main Targets:"
+	@echo "  all          Run everything: exploration, then ml_pipeline"
+	@echo "  exploration  Run generate -> explore -> analyze -> plot"
+	@echo "  ml_pipeline  Train and validate surrogate model(s)"
+	@echo ""
+
+# Orchestration
+all: exploration ml_pipeline
+
+# --- Data Exploration Phase ---
+
+exploration: kill generate explore analyze plot
+
+kill:
+	@echo "--- Killing stale DESTINY and Python processes ---"
+	-pkill -9 -f $(EXPLORE_SCRIPT)
+	-pkill -9 -u $(shell whoami) destiny
+	@sleep 1
 
 generate:
-	@echo "--- Step 1: Generating $(NUM_VARIANTS) synthetic variants for $(TYPE) ---"
-	python3 $(GENERATE_SCRIPT) --type $(TYPE) --num_variants $(NUM_VARIANTS)
+	@echo "--- Step 1: Generating cells (MODE=$(MODE), TYPE=$(TYPE)) ---"
+	python3 $(GENERATE_SCRIPT) --type $(TYPE)
 
 explore:
-	@echo "--- Step 2: Running parallel simulations for $(TYPE) ---"
-	python3 $(RUN_SCRIPT) --type $(TYPE)
+	@echo "--- Step 2: Running parallel simulations for $(TYPE)$(SUFFIX) ---"
+	python3 $(EXPLORE_SCRIPT) --type $(TYPE)
 
 analyze:
-	@echo "--- Step 3: Performing Pareto analysis for $(TYPE) ---"
-	python3 $(ANALYZE_SCRIPT) --type $(TYPE)
+	@echo "--- Step 3: Performing Pareto analysis for $(TYPE)$(SUFFIX) ---"
+	python3 $(ANALYZE_SCRIPT) --type $(TYPE) $(ARCH_FLAG)
 
 plot:
-	@echo "--- Step 4: Generating Pareto visualization for $(TYPE) ---"
-	python3 $(PLOT_SCRIPT)
+	@echo "--- Step 4: Generating Pareto visualization for $(TYPE)$(SUFFIX) ---"
+	@if [ "$(MODE)" = "arch" ]; then \
+		if [ "$(TYPE)" = "ALL" ]; then \
+			for tech in $(TECHS); do python3 $(PLOT_SCRIPT) --tech $$tech; done \
+		else \
+			python3 $(PLOT_SCRIPT) --tech $(TYPE); \
+		fi \
+	else \
+		python3 $(PLOT_SCRIPT); \
+	fi
+
+# --- ML Surrogate Pipeline ---
+
+ml_pipeline:
+ifeq ($(TYPE), ALL)
+	@for tech in $(TECHS); do \
+		echo "--- Running ML Pipeline for $$tech ($(MODE)) ---"; \
+		$(MAKE) -f Makefile.exploration tune train validate TYPE=$$tech MODE=$(MODE); \
+	done
+else
+	@$(MAKE) -f Makefile.exploration tune train validate TYPE=$(TYPE) MODE=$(MODE)
+endif
+
+tune:
+	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) ---"
+	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --trials 10
 
 train:
-	@echo "--- Step 5: Training Surrogate Model for $(TYPE) ---"
-	python3 $(TRAIN_SCRIPT) --tech $(TYPE)
+	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) ---"
+	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG)
 
 validate:
-	@echo "--- Step 6: Validating Surrogate Model for $(TYPE) ---"
+	@echo "--- Validating Surrogate Model for $(TYPE)$(SUFFIX) ---"
 	python3 $(VALIDATE_SCRIPT) --tech $(TYPE)
 
-ml_pipeline: train validate
+design:
+	@echo "--- Running Inverse Design for $(TYPE)$(SUFFIX) ---"
+	python3 $(INV_DESIGN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG)
+
+# --- Cleaning ---
 
 clean:
-	@echo "--- Cleaning data for $(TYPE) ---"
-	rm -rf temp_configs/$(TYPE)
-	rm -rf exploration_results/$(TYPE)
-	rm -rf pareto/$(TYPE)
-	rm -rf pareto/plots/$(TYPE)
-	rm -rf model_output/$(shell echo $(TYPE) | tr A-Z a-z)
+ifeq ($(TYPE), ALL)
+	@echo "--- Cleaning all data for $(TECHS) ($(MODE)) ---"
+	@for tech in $(TECHS); do \
+		rm -rf $(RAM_DIR)/$$tech$(SUFFIX); \
+		rm -rf exploration_results/$$tech$(SUFFIX); \
+		rm -rf pareto/$$tech$(SUFFIX); \
+		rm -rf pareto/plots/$$tech$(SUFFIX); \
+	done
+else
+	@echo "--- Cleaning data for $(TYPE) ($(MODE)) ---"
+	rm -rf $(RAM_DIR)/$(TYPE)$(SUFFIX)
+	rm -rf exploration_results/$(TYPE)$(SUFFIX)
+	rm -rf pareto/$(TYPE)$(SUFFIX)
+	rm -rf pareto/plots/$(TYPE)$(SUFFIX)
+endif
 
 clean_all:
-	@echo "Cleaning up all generated outputs..."
-	rm -rf synthetic_cells/ temp_configs/ exploration_results/ pareto/ model_output/
+	@echo "Cleaning up ALL generated outputs across ALL modes..."
+	rm -rf synthetic_cells/ exploration_results/ pareto/ model_output/ $(RAM_DIR)/

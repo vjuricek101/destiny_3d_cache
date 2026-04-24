@@ -4,27 +4,30 @@ obj/
 Makefile.dep
 
 # Generated design space data (Large CSVs)
+# Large data directories
 exploration_results/
 synthetic_cells/
 temp_configs/
-
-*.csv
-
-# Python cache
-__pycache__/
-*.pyc
-
-# Temporary files
-tmp_test.cfg
-*.log
-
-# Environments
-venv/
+pareto/
+!pareto/*.png
+!pareto/summaries/
 
 # ML Operations & Databases
 optuna_study.db
 model_output/
+!model_output/**/*.csv
+!model_output/**/*.png
+!model_output/**/*.json
+
+# Environments & Agents
+venv/
+.gemini/
+.env
 
 # Temporary / Misc
 scratch/
+validation_temp.*
+*.log
+__pycache__/
+*.pyc
 .DS_Store
