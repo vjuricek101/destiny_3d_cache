@@ -20,7 +20,7 @@ TEMPERATURE_FROM_STACK: Dict[str, Dict[int, int]] = {
 # From constant.h — used by Filter 1 (RRAM crossbar sneak-current ceiling)
 BITLINE_LEAKAGE_TOLERANCE = 1
 
-MAX_WORKERS: int = os.cpu_count() or 64
+MAX_WORKERS: int = 64 # or os.cpu_count()
 
 # ── Level 1: Capacity Sweep ────────────────────────────────────────────────────
 CAPACITY_SWEEP_KB: List[int] = [2**i for i in range(1, 16)] # 2 KB – 32 MB
@@ -149,6 +149,83 @@ def setup_dirs(mem_type: str) -> Tuple[str, str]:
     return temp_dir, results_dir
 
 
+# ── DESTINY stdout parser ─────────────────────────────────────────────────────
+
+def parse_destiny_stdout(stdout: str) -> dict:
+    """
+    Parse DESTINY stdout, extracting DATA ARRAY floorplan parameters as a flat dict. 
+    Latencies in nanoseconds.
+    """
+    # Isolate data array section
+    data_section = stdout
+    tag_marker = "CACHE TAG ARRAY DETAILS"
+    if tag_marker in stdout:
+        data_section = stdout[:stdout.index(tag_marker)]
+
+    result = {}
+
+    def to_ns(val: str, unit: str) -> float:
+        """Convert a latency value to nanoseconds."""
+        v = float(val)
+        return v / 1000.0 if unit == "ps" else v
+
+    # ── Bank organization: "Bank Organization: 1 x 1 x 2"
+    m = re.search(r"Bank Organization:\s*(\d+)\s*x\s*(\d+)\s*x\s*(\d+)", data_section)
+    if m:
+        result["destiny_bank_rows"]    = int(m.group(1))
+        result["destiny_bank_cols"]    = int(m.group(2))
+        result["destiny_bank_stacked"] = int(m.group(3))
+        result["destiny_total_banks"]  = (
+            int(m.group(1)) * int(m.group(2)) * int(m.group(3))
+        )
+
+    # ── Mat organization: "Mat Organization: 2 x 2"
+    m = re.search(r"Mat Organization:\s*(\d+)\s*x\s*(\d+)", data_section)
+    if m:
+        result["destiny_mat_rows"]   = int(m.group(1))
+        result["destiny_mat_cols"]   = int(m.group(2))
+        result["destiny_total_mats"] = int(m.group(1)) * int(m.group(2))
+
+    # ── Subarray size: "Subarray Size    : 1024 Rows x 2048 Columns"
+    m = re.search(
+        r"Subarray Size\s*:\s*(\d+)\s*Rows?\s*x\s*(\d+)\s*Columns?",
+        data_section
+    )
+    if m:
+        result["destiny_subarray_rows"] = int(m.group(1))
+        result["destiny_subarray_cols"] = int(m.group(2))
+
+    # ── Row activation fraction: "Row Activation   : 1 / 2"
+    m = re.search(r"Row Activation\s*:\s*(\d+)\s*/\s*(\d+)", data_section)
+    if m:
+        result["destiny_row_activation_num"]   = int(m.group(1))
+        result["destiny_row_activation_denom"] = int(m.group(2))
+
+    # ── Column activation fraction: "Column Activation: 1 / 1 x 1"
+    m = re.search(r"Column Activation\s*:\s*(\d+)\s*/\s*(\d+)", data_section)
+    if m:
+        result["destiny_col_activation_num"]   = int(m.group(1))
+        result["destiny_col_activation_denom"] = int(m.group(2))
+
+    # ── Senseamp Mux level: "Senseamp Mux      : 1"
+    m = re.search(r"Senseamp Mux\s*:\s*(\d+)", data_section)
+    if m:
+        result["destiny_senseamp_mux"] = int(m.group(1))
+
+    # ── Output Level-2 Mux (main output mux depth)
+    m = re.search(r"Output Level-2 Mux\s*:\s*(\d+)", data_section)
+    if m:
+        result["destiny_output_mux_l2"] = int(m.group(1))
+
+    # ── Bandwidth
+    m = re.search(r"Read Bandwidth\s*=\s*([\d.]+)(GB/s|MB/s)", data_section)
+    if m:
+        bw = float(m.group(1))
+        result["destiny_read_bw_GBs"] = bw if m.group(2) == "GB/s" else bw / 1000.0
+
+    return result
+
+
 # ── Worker Function ────────────────────────────────────────────────────────────
 
 def run_single_simulation(args: tuple) -> bool:
@@ -156,6 +233,12 @@ def run_single_simulation(args: tuple) -> bool:
     (cap_kb, cell_path, variant_name, roadmap, base_cfg_content,
      temp_dir, results_dir, cfg_overrides, cfg_suffix) = args
 
+    # Skip if already completed
+    final_csv = os.path.join(results_dir, f"{variant_name}_cap_{cap_kb}_rm_{roadmap}{cfg_suffix}.csv")
+    if os.path.exists(final_csv):
+        return True
+
+    
     # Mutate capacity
     new_cfg = re.sub(r"-Capacity\s*\(MB\):.*", f"-Capacity (KB): {cap_kb}", base_cfg_content)
     new_cfg = re.sub(r"-Capacity\s*\(KB\):.*", f"-Capacity (KB): {cap_kb}", new_cfg)
@@ -191,17 +274,34 @@ def run_single_simulation(args: tuple) -> bool:
     try:
         res = subprocess.run(
             ["./destiny", cfg_filepath],
-            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            check=False,
+            stdout=subprocess.PIPE,      # capture stdout for floorplan parsing
+            stderr=subprocess.DEVNULL,
+            text=True,
         )
         if res.returncode != 0:
             return False
 
         expected_csv = cfg_filepath.replace(".cfg", ".csv")
-        if os.path.exists(expected_csv):
-            final_csv = os.path.join(results_dir, cfg_filename.replace(".cfg", ".csv"))
-            shutil.move(expected_csv, final_csv)
-            return True
-        return False
+        if not os.path.exists(expected_csv):
+            return False
+
+        # Parse internal floorplan parameters from DESTINY's text report
+        floorplan = parse_destiny_stdout(res.stdout)
+        if floorplan:
+            # Read DESTINY's raw output (which has no header)
+            df_out = pd.read_csv(expected_csv, header=None)
+            for k, v in floorplan.items():
+                df_out[k] = v
+            # Save WITH a header for self-describing CSVs
+            df_out.to_csv(expected_csv, index=False)
+
+        final_csv = os.path.join(
+            results_dir, cfg_filename.replace(".cfg", ".csv")
+        )
+        shutil.move(expected_csv, final_csv)
+        return True
+
     finally:
         if os.path.exists(cfg_filepath):
             os.remove(cfg_filepath)
@@ -351,8 +451,11 @@ def collect_simulations(mem_type: str) -> Tuple[List[tuple], Dict[str, int]]:
 
     cells = sorted(f for f in os.listdir(cell_dir) if f.endswith('.cell'))
 
+    simulation_args, rejected = build_simulation_args(
+        mem_type, cells, cell_dir, base_cfg_content, temp_dir, results_dir
+    )
+
     print(f"  Valid: {len(simulation_args)} | Rejected: {sum(rejected.values())}")
-            
     return simulation_args, rejected
 
 

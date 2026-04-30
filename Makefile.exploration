@@ -20,7 +20,7 @@ ifeq ($(MODE), arch)
 	ANALYZE_SCRIPT  = pareto_analysis.py
 	TUNE_SCRIPT     = tune_model.py
 	PLOT_SCRIPT     = visualize_pareto_arch.py
-	TRAIN_SCRIPT    = train_model_arch.py
+	TRAIN_SCRIPT    = train_model.py
 	INV_DESIGN_SCRIPT = inverse_design.py
 	SUFFIX = _arch
 	ARCH_FLAG = --arch

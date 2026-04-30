@@ -56,6 +56,14 @@ FORCE_NUMERIC_COLS = [
 # Wide-range numerics: log10-transformed (zeros stay 0).
 LOG_NUMERIC_COLS = [
     "capacity_mb",
+    "destiny_total_mats",
+    "destiny_total_banks",
+    "destiny_mat_rows",
+    "destiny_mat_cols",
+    "destiny_subarray_rows",
+    "destiny_subarray_cols",
+    "destiny_bank_stacked",
+    "destiny_read_bw_GBs",
     "CellInput_CellArea (F^2)",
     "CellInput_SRAMCellNMOSWidth (F)",
     "CellInput_SRAMCellPMOSWidth (F)",
@@ -90,7 +98,11 @@ BINARY_CFG_COLS = ["internal_sensing"]
 # Other numeric inputs that scale linearly (e.g., ProcessNode, Temperature)
 LINEAR_NUMERIC_COLS = [
     "Temperature (K)",
-    "CellInput_ProcessNode"
+    "CellInput_ProcessNode",
+    "destiny_senseamp_mux",     # small integers, linear is fine
+    "destiny_output_mux_l2",
+    "destiny_row_activation_num",
+    "destiny_col_activation_num",
 ]
 
 
@@ -192,12 +204,13 @@ def build_features(df: pd.DataFrame, extra_drop_cols: list = None) -> pd.DataFra
     if bin_cols:
         df[bin_cols] = df[bin_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
 
-    # Coerce linear specific mappings to ensure float types
-    lin_cols = [c for c in LINEAR_NUMERIC_COLS if c in df.columns]
-    if lin_cols:
-        df[lin_cols] = df[lin_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+    # Categorical encoding (One-Hot) for roadmap and node
+    cat_cols = [c for c in ["roadmap", "ProcessNode"] if c in df.columns]
+    if cat_cols:
+        df = pd.get_dummies(df, columns=cat_cols, prefix=cat_cols)
 
-    return df.fillna(0).astype(np.float32)
+    # Final cast to numeric, dropping any non-numeric leftovers
+    return df.apply(pd.to_numeric, errors="coerce").fillna(0).astype(np.float32)
 
 
 def log_targets(df: pd.DataFrame) -> np.ndarray:
@@ -209,9 +222,19 @@ def log_targets(df: pd.DataFrame) -> np.ndarray:
 def prepare_data(args):
     """Loads, filters, engineers, scales, and splits the data into 80/10/10 matrices."""
     print("DESTINY PPA Surrogate Model Training:")
-    print(f"Loading data from: {args.data}")
     df_raw = pd.read_csv(args.data).dropna(subset=TARGET_COLS)
-    print(f"  Shape after dropping NaN targets: {df_raw.shape}")
+    
+    # Physical Filter: Drop DESTINY simulation failures (e.g. Latency > 100ns or overflow)
+    initial_len = len(df_raw)
+    df_raw = df_raw[
+        (df_raw["Cache Hit Latency (ns)"] < 100) & 
+        (df_raw["Cache Area (mm^2)"] < 1000) & 
+        (df_raw["Cache Hit Energy (nJ)"] < 1000)
+    ]
+    if len(df_raw) < initial_len:
+        print(f"  [FILTER] Dropped {initial_len - len(df_raw)} non-physical simulation failures (Latency > 100ns, etc.)")
+    
+    print(f"  Final training set size: {df_raw.shape}")
 
     print("\nTechnology distribution:")
     for tech, count in df_raw["memory_technology"].value_counts().items():
@@ -464,6 +487,7 @@ def parse_args(args=None):
     p.add_argument("--alpha", type=float, nargs=4, default=[1.5, 1.0, 3.0, 1.0],
                    help="Loss weights for [Latency, Area, Energy, Leakage].")
     p.add_argument("--from-study", default=None, help="Load optimized hyperparameters from an Optuna study.")
+    p.add_argument("--arch", action="store_true", help="Use architectural sweep data source.")
     return p.parse_args(args)
 
 
@@ -471,6 +495,7 @@ def load_params_from_study(args):
     if not args.from_study: return
     db = "sqlite:///optuna_study.db"
     try:
+        import optuna
         best = optuna.load_study(study_name=args.from_study, storage=db).best_params
         print(f"\n[INFO] Loading optimized parameters from: {args.from_study}")
         for k in ["hidden_dim", "n_blocks", "lr", "dropout"]:
@@ -484,7 +509,8 @@ if __name__ == "__main__":
     args = parse_args()
     load_params_from_study(args)
 
-    args.data = (f"pareto/{args.tech}/{args.tech}_full_data.csv"
+    suffix = "_arch" if args.arch else ""
+    args.data = (f"pareto/{args.tech}{suffix}/{args.tech}{suffix}_full_data.csv"
                  if args.tech != "ALL" else "pareto/full_data.csv")
 
     if args.output_dir == "model_output":

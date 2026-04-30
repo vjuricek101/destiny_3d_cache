@@ -24,8 +24,11 @@ def is_pareto_efficient(costs):
 
 # ── Utility Functions ─────────────────────────────────────────────────────────
 
+CELL_CACHE = {}
 def parse_cell_file(filepath):
-    """Extract CellInput_ parameters from .cell file."""
+    """Extract CellInput_ parameters from .cell file with caching."""
+    if filepath in CELL_CACHE: return CELL_CACHE[filepath]
+    
     params = {}
     if not os.path.exists(filepath): return params
     with open(filepath, 'r') as f:
@@ -34,6 +37,8 @@ def parse_cell_file(filepath):
             parts = line[1:].split(':', 1)
             if len(parts) == 2:
                 params[f"CellInput_{parts[0].strip()}"] = pd.to_numeric(parts[1].strip(), errors='ignore')
+    
+    CELL_CACHE[filepath] = params
     return params
 
 def parse_metadata(stem, tech, is_arch=False):
@@ -70,12 +75,21 @@ def parse_metadata(stem, tech, is_arch=False):
 def load_sim_csv(results_path, tech, is_arch=False):
     """Loads a single simulation CSV and attaches metadata/cell physics."""
     try:
-        df_raw = pd.read_csv(results_path, header=None, skipinitialspace=True)
+        # Load the CSV (assumes headers exist in the new standard format)
+        df_raw = pd.read_csv(results_path)
         is_cache = len(df_raw.columns) >= 90
-        cols = [1,2,6,10] if is_cache else [24,32,35,38]
         
-        df = df_raw.iloc[:, cols].copy()
-        df.columns = ["Cache Area (mm^2)", "Cache Hit Latency (ns)", "Cache Hit Energy (nJ)", "Cache Leakage Power (mW)"]
+        # Select the 4 main PPA metrics using the positional column names ("0", "1", "2"...)
+        # created when run_exploration_arch.py added headers to DESTINY's raw output.
+        ppa_idx = ["1", "2", "6", "10"] if is_cache else ["24", "32", "35", "38"]
+        df = df_raw[ppa_idx].copy()
+        
+        # Capture all internal floorplan components
+        destiny_cols = [c for c in df_raw.columns if c.startswith("destiny_")]
+        for c in destiny_cols:
+            df[c] = df_raw[c]
+
+        df.columns = ["Cache Area (mm^2)", "Cache Hit Latency (ns)", "Cache Hit Energy (nJ)", "Cache Leakage Power (mW)"] + destiny_cols
         if not is_cache: df.iloc[:, 2] /= 1000.0 # pJ -> nJ
         
         meta = parse_metadata(Path(results_path).stem, tech, is_arch)
@@ -92,7 +106,8 @@ def load_sim_csv(results_path, tech, is_arch=False):
             
         for k, v in parse_cell_file(cell_path).items(): df[k] = v
         return df
-    except Exception:
+    except Exception as e:
+        # print(f"Error loading {results_path}: {e}")
         return None
 
 # ── Orchestration ─────────────────────────────────────────────────────────────
@@ -106,8 +121,22 @@ def process_results(tech, is_arch, only_full):
     if not csv_files: return
 
     print(f"Aggregating {tech}{suffix} ({len(csv_files)} files)...")
-    dfs = [load_sim_csv(str(f), tech, is_arch) for f in csv_files]
-    full_df = pd.concat([d for d in dfs if d is not None], ignore_index=True)
+    
+    all_dfs = []
+    chunk_size = 5000
+    for i in range(0, len(csv_files), chunk_size):
+        chunk = csv_files[i : i + chunk_size]
+        dfs = [load_sim_csv(str(f), tech, is_arch) for f in chunk]
+        valid_dfs = [d for d in dfs if d is not None]
+        if valid_dfs:
+            all_dfs.append(pd.concat(valid_dfs, ignore_index=True))
+        print(f"  Processed {min(i + chunk_size, len(csv_files))}/{len(csv_files)}...")
+
+    if not all_dfs:
+        print(f"ERROR: No valid data found in {res_dir}")
+        return
+
+    full_df = pd.concat(all_dfs, ignore_index=True)
     
     out_dir = Path(f"pareto/{tech}{suffix}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -116,7 +145,7 @@ def process_results(tech, is_arch, only_full):
     if only_full: return
 
     # Calculation logic for filters
-    ppa_cols = ["Cache Hit Latency (ns)", "Cache Area (mm^2)"]
+    ppa_cols = ["Cache Hit Latency (ns)", "Cache Area (mm^2)", "Cache Hit Energy (nJ)", "Cache Leakage Power (mW)"]
     pareto_frames = []
     
     print(f"  Calculating Pareto frontiers...")

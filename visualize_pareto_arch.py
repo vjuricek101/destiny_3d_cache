@@ -115,17 +115,56 @@ def plot_pareto_shift_matrix(tech: str, df: pd.DataFrame, out_dir: str):
 
             if j == cols - 1: # Add legend to the rightmost plot of each row
                 ax.legend(title=klabel, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8, ncol=1)
-            format_log_axis(ax, axis="both" if yscale == "log" else "x")
+def format_log_axis(ax, axis="x"):
+    """Helper for clean log axis labels."""
+    from matplotlib.ticker import LogLocator, FuncFormatter
+    if "x" in axis:
+        ax.xaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0,), numticks=10))
+    if "y" in axis:
+        ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0,), numticks=10))
 
-    path = os.path.join(out_dir, f"{tech}_arch_pareto_shift_matrix.png")
-    fig.savefig(path, dpi=200, bbox_inches="tight")
-    plt.close(fig)
+def plot_architectural_sensitivities(tech, df, out_dir):
+    """Simple sensitivity plots for WW, Assoc, Stacking."""
+    knobs = ["word_width", "associativity", "stacked_die_count"]
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    fig.suptitle(f"Architectural Metric Sensitivity — {tech}", fontsize=16)
+    
+    for ax, knob in zip(axes, knobs):
+        if knob not in df.columns: continue
+        df.groupby(knob)[LAT_COL].mean().plot(kind='bar', ax=ax, color='teal', alpha=0.7)
+        ax.set_title(f"Impact of {knob}")
+        ax.set_ylabel("Avg Latency (ns)")
+        ax.grid(axis='y', alpha=0.3)
+        
+    path = os.path.join(out_dir, f"{tech}_sensitivities.png")
+    plt.savefig(path)
+    plt.close()
+    print(f"  Saved: {path}")
+
+def plot_capacity_scaling(tech, df, out_dir):
+    """Plot PPA scaling across capacity points."""
+    fig, ax = plt.subplots(figsize=(8, 6))
+    for metric, label, scale in METRICS:
+        scaled = df.groupby(CAP_COL)[metric].mean()
+        scaled.plot(ax=ax, label=label, marker='o')
+    
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlabel("Capacity (MB)")
+    ax.set_ylabel("Normalized Metrics")
+    ax.set_title(f"Technology Scaling Trend — {tech}")
+    ax.legend()
+    ax.grid(True, which="both", alpha=0.3)
+    
+    path = os.path.join(out_dir, f"{tech}_scaling_trends.png")
+    plt.savefig(path)
+    plt.close()
     print(f"  Saved: {path}")
 
 def main(tech: str):
     full_csv = f"pareto/{tech}_arch/{tech}_arch_full_data.csv"
     if not os.path.exists(full_csv):
-        print(f"ERROR: {full_csv} not found. Run pareto_analysis_arch.py first.")
+        print(f"ERROR: {full_csv} not found. Run pareto_analysis.py --arch first.")
         return
 
     print(f"Loading architectural sweep data: {full_csv}")
@@ -140,12 +179,6 @@ def main(tech: str):
     plot_pareto_shift_matrix(tech, df, out_dir)
     
     print("\nVisualization Done.")
-
-if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--tech", default="SRAM")
-    args = p.parse_args()
-    main(args.tech)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
