@@ -33,9 +33,10 @@ class UnifiedOptimizer:
         self.stds = torch.tensor(self.scaler.scale_, dtype=torch.float32, device=self.device)
 
     def _get_target_tensor(self, targets):
-        t_vals = [targets.get(c, 1.0) for c in ["Latency (ns)", "Area (mm^2)", "Energy (nJ)", "Leakage (mW)"]]
+        target_keys = ["cache_hit_latency_ns", "cache_area_mm2", "cache_hit_energy_nJ", "cache_leakage_mW"]
+        t_vals = [targets.get(c, 1.0) for c in target_keys]
         t_logs = np.log10(np.clip(t_vals, 1e-12, None))
-        weights = [1.0 if c in targets else 0.0 for c in ["Latency (ns)", "Area (mm^2)", "Energy (nJ)", "Leakage (mW)"]]
+        weights = [1.0 if c in targets else 0.0 for c in target_keys]
         return torch.tensor(t_logs, dtype=torch.float32, device=self.device), torch.tensor(weights, dtype=torch.float32, device=self.device)
 
     def optimize(self, targets, fixed_context, steps=300):
@@ -50,22 +51,22 @@ class UnifiedOptimizer:
             
             # Map [0,1] to physical Log-Bounds
             # Cap: 2KB-32MB (log10), WW: 64-2048, Assoc: 1-64, Stack: 1-16
-            cap = 10 ** (arch_params[0] * (np.log10(32) - np.log10(2/1024)) + np.log10(2/1024))
+            cap = 10 ** (arch_params[0] * (np.log10(32768) - np.log10(2)) + np.log10(2))
             ww  = 2 ** (arch_params[1] * (11 - 6) + 6)
             asc = 2 ** (arch_params[2] * (6 - 0) + 0)
             stk = 2 ** (arch_params[3] * (4 - 0) + 0)
             
             # Build input row
             feat_dict = fixed_context.copy()
-            feat_dict.update({"capacity_mb": cap, "word_width": ww, "associativity": asc, "stacked_die_count": stk})
+            feat_dict.update({"capacity_kb": cap, "word_width_bits": ww, "associativity": asc, "data_stacked_die_count": stk})
             
             # Create Differentiable Feature Vector
             row = []
             for c in self.feature_cols:
-                if c == "capacity_mb": row.append(torch.log10(cap))
-                elif c == "word_width": row.append(torch.log2(ww))
+                if c == "capacity_kb": row.append(torch.log10(cap))
+                elif c == "word_width_bits": row.append(torch.log2(ww))
                 elif c == "associativity": row.append(torch.log2(asc))
-                elif c == "stacked_die_count": row.append(torch.log2(stk))
+                elif c == "data_stacked_die_count": row.append(torch.log2(stk))
                 else: 
                     val = feat_dict.get(c, 0.0)
                     row.append(torch.tensor(val if not isinstance(val, bool) else float(val), device=self.device))
@@ -84,14 +85,14 @@ class UnifiedOptimizer:
 
         # Snap result to valid hardware config
         with torch.no_grad():
-            final_cap_mb = 10 ** (arch_params[0] * (np.log10(32) - np.log10(2/1024)) + np.log10(2/1024))
-            final_cap_kb = 2 ** round(np.log2(final_cap_mb.item() * 1024))
+            final_cap_kb = 10 ** (arch_params[0] * (np.log10(32768) - np.log10(2)) + np.log10(2))
+            final_cap_kb = 2 ** round(np.log2(final_cap_kb.item()))
             
             res = {
                 "capacity_kb": int(np.clip(final_cap_kb, 2, 32768)),
-                "word_width":  int(2 ** round((arch_params[1] * (11 - 6) + 6).item())),
+                "word_width_bits":  int(2 ** round((arch_params[1] * (11 - 6) + 6).item())),
                 "associativity": int(2 ** round((arch_params[2] * (6 - 0) + 0).item())),
-                "stacked_die_count": int(2 ** round((arch_params[3] * (4 - 0) + 0).item()))
+                "data_stacked_die_count": int(2 ** round((arch_params[3] * (4 - 0) + 0).item()))
             }
             # Add context for reporting
             res.update(fixed_context)
@@ -114,16 +115,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     targets = {}
-    if args.target_latency: targets["Latency (ns)"] = args.target_latency
-    if args.target_area:    targets["Area (mm^2)"] = args.target_area
-    if args.target_energy:  targets["Energy (nJ)"] = args.target_energy
+    if args.target_latency: targets["cache_hit_latency_ns"] = args.target_latency
+    if args.target_area:    targets["cache_area_mm2"] = args.target_area
+    if args.target_energy:  targets["cache_hit_energy_nJ"] = args.target_energy
 
     if not targets:
         print("Error: No targets specified.")
         exit(1)
 
     # Build context (Physics are defaults for _arch mode)
-    context = {"CellInput_ProcessNode": args.node, "DeviceRoadmap_" + args.roadmap: 1.0}
+    context = {"process_node_nm": args.node, "device_roadmap_" + args.roadmap: 1.0}
     
     opt = UnifiedOptimizer(args.tech, is_arch=args.arch)
     design, ppa = opt.optimize(targets, context)

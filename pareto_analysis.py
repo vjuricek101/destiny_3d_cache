@@ -22,92 +22,15 @@ def is_pareto_efficient(costs):
         if np.any(dominated): is_efficient[i] = False
     return is_efficient
 
-# Utility Functions
-
-CELL_CACHE = {}
-def parse_cell_file(filepath):
-    """Extract CellInput_ parameters from .cell file with caching."""
-    if filepath in CELL_CACHE: return CELL_CACHE[filepath]
-    
-    params = {}
-    if not os.path.exists(filepath): return params
-    with open(filepath, 'r') as f:
-        for line in f:
-            if not line.startswith('-'): continue
-            parts = line[1:].split(':', 1)
-            if len(parts) == 2:
-                params[f"CellInput_{parts[0].strip()}"] = pd.to_numeric(parts[1].strip(), errors='ignore')
-    
-    CELL_CACHE[filepath] = params
-    return params
-
-def parse_metadata(stem, tech, is_arch=False):
-    """Extracts swept parameters from simulation output filenames."""
-    meta = {'memory_technology': tech}
-    
-    # Common mappings
-    mappings = {'cap_kb': r'_cap_(\d+)', 'word_width': r'_ww(\d+)', 
-                'associativity': r'_a(\d+)', 'stacked_die_count': r'_s(\d+)', 
-                'roadmap': r'_rm_([A-Z]+)'}
-    
-    # Specific mappings
-    if is_arch:
-        mappings['Temperature (K)'] = r'_t(\d+)'
-    else:
-        mappings['variant_id'] = r'variant_(\d+)'
-        # For standard runs, temperature is derived from stack count (Level 4)
-        m = re.search(r'_s(\d+)', stem)
-        if m:
-            temp_map = {"SRAM": {1: 350, 2: 363, 4: 380}, "eDRAM": {1: 350, 2: 363, 4: 380}, "RRAM": {1: 313, 2: 333, 4: 358}}
-            stack = int(m.group(1))
-            if tech in temp_map and stack in temp_map[tech]:
-                meta['Temperature (K)'] = temp_map[tech][stack]
-
-    for key, pattern in mappings.items():
-        m = re.search(pattern, stem)
-        if m: meta[key] = m.group(1)
-        
-    if 'cap_kb' in meta: meta['capacity_mb'] = float(meta['cap_kb']) / 1024.0
-    return meta
-
 # Data Loading
 
 def load_sim_csv(results_path, tech, is_arch=False):
-    """Loads a single simulation CSV and attaches metadata/cell physics."""
+    """Loads a single simulation CSV."""
     try:
-        # Load the CSV (assumes headers exist in the new standard format)
-        df_raw = pd.read_csv(results_path)
-        is_cache = len(df_raw.columns) >= 90
-        
-        # Select the 4 main PPA metrics using the positional column names ("0", "1", "2"...)
-        # created when run_exploration_arch.py added headers to DESTINY's raw output.
-        ppa_idx = ["1", "2", "6", "10"] if is_cache else ["24", "32", "35", "38"]
-        df = df_raw[ppa_idx].copy()
-        
-        # Capture all internal floorplan components
-        destiny_cols = [c for c in df_raw.columns if c.startswith("destiny_")]
-        for c in destiny_cols:
-            df[c] = df_raw[c]
-
-        df.columns = ["Cache Area (mm^2)", "Cache Hit Latency (ns)", "Cache Hit Energy (nJ)", "Cache Leakage Power (mW)"] + destiny_cols
-        if not is_cache: df.iloc[:, 2] /= 1000.0 # pJ -> nJ
-        
-        meta = parse_metadata(Path(results_path).stem, tech, is_arch)
-        for k, v in meta.items(): df[k] = v
-        
-        # Resolve cell physics path
-        m = re.search(r'_n(\d+)', results_path)
-        node = m.group(1) if m else "32"
-        
-        if is_arch:
-            cell_path = f"synthetic_cells/{tech}_arch/arch_variant_nominal_n{node}.cell"
-        else:
-            cell_path = f"synthetic_cells/{tech}/synthetic_variant_{meta.get('variant_id')}_n{node}.cell"
-            
-        for k, v in parse_cell_file(cell_path).items(): df[k] = v
+        df = pd.read_csv(results_path)
+        if df.empty: return None
         return df
     except Exception as e:
-        # print(f"Error loading {results_path}: {e}")
         return None
 
 # Orchestration
@@ -145,11 +68,11 @@ def process_results(tech, is_arch, only_full):
     if only_full: return
 
     # Calculation logic for filters
-    ppa_cols = ["Cache Hit Latency (ns)", "Cache Area (mm^2)", "Cache Hit Energy (nJ)", "Cache Leakage Power (mW)"]
+    ppa_cols = ["cache_hit_latency_ns", "cache_area_mm2", "cache_hit_energy_nJ", "cache_leakage_mW"]
     pareto_frames = []
     
     print(f"  Calculating Pareto frontiers...")
-    for cap, group in full_df.groupby('capacity_mb'):
+    for cap, group in full_df.groupby('capacity_kb'):
         costs = group[ppa_cols].values
         p_df = group[is_pareto_efficient(costs)]
         p_df.to_csv(out_dir / f"{tech}{suffix}_cap_{str(cap).replace('.','_')}_pareto.csv", index=False)

@@ -193,6 +193,7 @@ int main(int argc, char *argv[])
             cout << "Could not open file " << outputFileName << "!" << endl;
             exit(-1);
         }
+        Result::printCsvHeader(outputFile);  // write descriptive column headers
 	}
 
     int numCellTypes = inputParameter->fileMemCell.size();
@@ -566,7 +567,15 @@ int nvsim(ofstream& outputFile, string inputFileName, long long& numSolution, Re
 				}
 
 		for (int i = 0; i < (int)full_exploration; i++) {
-			bestDataResults[i].printAsCacheToCsvFile(bestTagResults[i], inputParameter->cacheAccessMode, outputFile);
+			/* Bug fix: set optimizationTarget so printOptimizationTarget() returns correct string */
+			bestDataResults[i].optimizationTarget = (OptimizationTarget)i;
+			if (inputParameter->designTarget == cache) {
+				bestTagResults[i].optimizationTarget = (OptimizationTarget)i;
+				bestDataResults[i].printAsCacheToCsvFile(bestTagResults[i], inputParameter->cacheAccessMode, outputFile);
+			} else {
+				bestDataResults[i].printToCsvFile(outputFile, true);
+				outputFile << endl;
+			}
 		}
 		cout << "Pruning done" << endl;
 		/* Run pruning here */

@@ -27,18 +27,31 @@ from sklearn.metrics import r2_score, mean_absolute_percentage_error, mean_squar
 # Column definitions
 
 TARGET_COLS = [
-    "Cache Hit Latency (ns)",
-    "Cache Area (mm^2)",
-    "Cache Hit Energy (nJ)",
-    "Cache Leakage Power (mW)",
+    "cache_hit_latency_ns",
+    "cache_area_mm2",
+    "cache_hit_energy_nJ",
+    "cache_leakage_mW",
 ]
 TARGET_LABELS = ["Latency (ns)", "Area (mm^2)", "Energy (nJ)", "Leakage (mW)"]
 
-DROP_COLS = ["variant_id", "CellInput_MemCellType"]
+DROP_COLS = [
+    "variant_name",
+    "opt_target",
+    "cache_access_mode",
+    "cache_miss_latency_ns",
+    "cache_write_latency_ns",
+    "cache_refresh_latency_ns",
+    "cache_miss_energy_nJ",
+    "cache_write_energy_nJ",
+    "cache_refresh_energy_nJ",
+    "cache_refresh_power_W",
+    "CellInput_MemCellType",
+    "CellInput_ProcessNode",
+]
 
 CATEGORICAL_COLS = [
-    "memory_technology",
-    "DeviceRoadmap",
+    "mem_cell_type",
+    "device_roadmap",
     "CellInput_AccessType",
     "CellInput_ReadMode",
     "CellInput_ResetMode",
@@ -55,15 +68,14 @@ FORCE_NUMERIC_COLS = [
 
 # Wide-range numerics: log10-transformed (zeros stay 0).
 LOG_NUMERIC_COLS = [
-    "capacity_mb",
-    "destiny_total_mats",
-    "destiny_total_banks",
-    "destiny_mat_rows",
-    "destiny_mat_cols",
-    "destiny_subarray_rows",
-    "destiny_subarray_cols",
-    "destiny_bank_stacked",
-    "destiny_read_bw_GBs",
+    "capacity_kb",
+    "data_total_mats",
+    "data_total_banks",
+    "data_num_row_subarray",
+    "data_num_col_subarray",
+    "data_subarray_num_row",
+    "data_subarray_num_col",
+    "data_stacked_die_count",
     "CellInput_CellArea (F^2)",
     "CellInput_SRAMCellNMOSWidth (F)",
     "CellInput_SRAMCellPMOSWidth (F)",
@@ -88,9 +100,9 @@ LOG_NUMERIC_COLS = [
 # stacked_die_count from all technologies.
 # internal_sensing is a binary flag from RRAM sweeps (0 or 1, kept as-is).
 LOG2_CFG_COLS = [
-    "word_width",
+    "word_width_bits",
     "associativity",
-    "stacked_die_count",
+    "data_stacked_die_count",
 ]
 
 # Binary cfg param — just passthrough (already 0/1).
@@ -98,12 +110,15 @@ BINARY_CFG_COLS = ["internal_sensing"]
 
 # Other numeric inputs that scale linearly (e.g., ProcessNode, Temperature)
 LINEAR_NUMERIC_COLS = [
-    "Temperature (K)",
-    "CellInput_ProcessNode",
-    "destiny_senseamp_mux",     # small integers, linear is fine
-    "destiny_output_mux_l2",
-    "destiny_row_activation_num",
-    "destiny_col_activation_num",
+    "temperature_K",
+    "process_node_nm",
+    "data_mux_sense_amp",
+    "data_mux_output_lev2",
+    "data_num_active_mat_per_row",
+    "data_num_active_mat_per_col",
+    "data_num_active_subarray_per_row",
+    "data_num_active_subarray_per_col",
+    "data_num_row_per_set",
 ]
 
 # Columns irrelevant to each specific technology (beyond the shared DROP_COLS).
@@ -127,7 +142,6 @@ TECH_DROP_COLS: dict[str, list[str]] = {
     "SRAM":  _NVM_SHARED_DROPS + [
         "CellInput_DRAMCellCapacitance (F)", "CellInput_RetentionTime (us)",
         "CellInput_AccessType",
-        "cap_kb",   # redundant with capacity_mb
     ],
     "eDRAM": _NVM_SHARED_DROPS + ["CellInput_AccessType"],
     "RRAM":  _RRAM_SRAM_SHARED_DROPS + ["CellInput_MinSenseVoltage (mV)"],
@@ -193,8 +207,8 @@ def build_features(df: pd.DataFrame, extra_drop_cols: list = None) -> pd.DataFra
         df[force_cols] = df[force_cols].apply(pd.to_numeric, errors="coerce")
 
     # Derived physical features
-    if "capacity_mb" in df.columns:
-        df["derived_sqrt_capacity"] = np.sqrt(df["capacity_mb"])
+    if "capacity_kb" in df.columns:
+        df["derived_sqrt_capacity"] = np.sqrt(df["capacity_kb"])
     if "CellInput_CellArea (F^2)" in df.columns:
         df["derived_sqrt_area"] = np.sqrt(df["CellInput_CellArea (F^2)"])
     if "CellInput_ReadVoltage (V)" in df.columns:
@@ -208,7 +222,7 @@ def build_features(df: pd.DataFrame, extra_drop_cols: list = None) -> pd.DataFra
     df = apply_transforms(df)
 
     # One-hot encoding for categorical variables
-    cat_cols = [c for c in CATEGORICAL_COLS + ["roadmap", "ProcessNode"] if c in df.columns]
+    cat_cols = [c for c in CATEGORICAL_COLS + ["device_roadmap", "process_node_nm"] if c in df.columns]
     df = pd.get_dummies(df, columns=cat_cols, dummy_na=False)
 
     return df.apply(pd.to_numeric, errors="coerce").fillna(0).astype(np.float32)
@@ -252,9 +266,9 @@ def filter_physical_failures(df: pd.DataFrame) -> pd.DataFrame:
     """Drop DESTINY simulation failures based on physical sanity checks."""
     initial_len = len(df)
     df = df[
-        (df["Cache Hit Latency (ns)"] < 100) & 
-        (df["Cache Area (mm^2)"] < 1000) & 
-        (df["Cache Hit Energy (nJ)"] < 1000)
+        (df["cache_hit_latency_ns"] < 100) & 
+        (df["cache_area_mm2"] < 1000) & 
+        (df["cache_hit_energy_nJ"] < 1000)
     ]
     if len(df) < initial_len:
         print(f"FILTER: Dropped {initial_len - len(df)} non-physical simulation failures.")
@@ -270,11 +284,11 @@ def prepare_data(args):
     print(f"  Final training set size: {df_raw.shape}")
 
     print("\nTechnology distribution:")
-    for tech, count in df_raw["memory_technology"].value_counts().items():
+    for tech, count in df_raw["mem_cell_type"].value_counts().items():
         print(f"  {tech:<8}  {count:>5} rows  ({100*count/len(df_raw):.1f}%)")
 
     if args.tech != "ALL":
-        df_raw = df_raw[df_raw["memory_technology"] == args.tech]
+        df_raw = df_raw[df_raw["mem_cell_type"] == args.tech]
         print(f"\nFiltered to {args.tech}: {len(df_raw)} rows")
         if len(df_raw) == 0:
             sys.exit(f"ERROR: No data found for technology '{args.tech}'.")
@@ -287,13 +301,13 @@ def prepare_data(args):
         return train_test_split(indices, test_size=size, random_state=42, stratify=strat)
 
     idx = np.arange(len(df_raw))
-    strat = df_raw["memory_technology"].values
+    strat = df_raw["mem_cell_type"].values
     iv, idx_test = split(idx, 0.1, strat)
     idx_train, idx_val = split(iv, 0.111, strat[iv])
     print(f"\nSplit: {len(idx_train)} train / {len(idx_val)} val / {len(idx_test)} test")
 
     # Feature engineering
-    tech_list = ["memory_technology"] if args.tech != "ALL" else []
+    tech_list = ["mem_cell_type"] if args.tech != "ALL" else []
     extra_drops = tech_list + TECH_DROP_COLS.get(args.tech, [])
     X_all_df = build_features(df_raw, extra_drop_cols=extra_drops)
 

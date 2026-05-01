@@ -13,8 +13,94 @@
 
 #include <iostream>
 #include <fstream>
+#include <string>
 
 using namespace std;
+
+// ── Static helpers ─────────────────────────────────────────────────────────
+
+static string roadmapToStr(DeviceRoadmap rm) {
+    switch (rm) {
+    case HP:    return "HP";
+    case LSTP:  return "LSTP";
+    case LOP:   return "LOP";
+    case EDRAM: return "EDRAM";
+    default:    return "Unknown";
+    }
+}
+
+static string cellTypeToStr(MemCellType t) {
+    switch (t) {
+    case SRAM:      return "SRAM";
+    case eDRAM:     return "eDRAM";
+    case memristor: return "RRAM";
+    case MRAM:      return "MRAM";
+    case PCRAM:     return "PCRAM";
+    case FBRAM:     return "FBRAM";
+    case SLCNAND:   return "SLCNAND";
+    default:        return "Other";
+    }
+}
+
+/* Writes 9 swept-parameter columns that prefix every CSV row. */
+static void writeSweptParamsCols(ofstream &outputFile, const string &optTarget) {
+    outputFile << optTarget << ","
+               << inputParameter->capacity / 1024 << ","
+               << inputParameter->wordWidth << ","
+               << inputParameter->associativity << ","
+               << inputParameter->temperature << ","
+               << inputParameter->processNode << ","
+               << roadmapToStr(inputParameter->deviceRoadmap) << ","
+               << (inputParameter->internalSensing ? "true" : "false") << ","
+               << cellTypeToStr(cell->memCellType) << ",";
+}
+
+/* Writes 41 array-column header names with an optional prefix (e.g. "data_"). */
+static void writeArrayColumnHeaders(ofstream &outputFile, const string &prefix) {
+    outputFile << prefix << "num_row_mat," << prefix << "num_col_mat,"
+               << prefix << "stacked_die_count,"
+               << prefix << "total_banks," << prefix << "total_mats,"
+               << prefix << "num_active_mat_per_col," << prefix << "num_active_mat_per_row,"
+               << prefix << "num_row_subarray," << prefix << "num_col_subarray,"
+               << prefix << "num_active_subarray_per_col," << prefix << "num_active_subarray_per_row,"
+               << prefix << "subarray_num_row," << prefix << "subarray_num_col,"
+               << prefix << "mux_sense_amp," << prefix << "mux_output_lev1," << prefix << "mux_output_lev2,"
+               << prefix << "num_row_per_set,"
+               << prefix << "local_wire_type," << prefix << "local_wire_repeater_type," << prefix << "local_wire_low_swing,"
+               << prefix << "global_wire_type," << prefix << "global_wire_repeater_type," << prefix << "global_wire_low_swing,"
+               << prefix << "area_optimization_level,"
+               << prefix << "bank_height_um," << prefix << "bank_width_um," << prefix << "bank_area_mm2,"
+               << prefix << "mat_height_um," << prefix << "mat_width_um," << prefix << "mat_area_mm2,"
+               << prefix << "subarray_height_um," << prefix << "subarray_width_um," << prefix << "subarray_area_mm2,"
+               << prefix << "area_efficiency_pct,"
+               << prefix << "read_latency_ns," << prefix << "write_latency_ns," << prefix << "refresh_latency_ns,"
+               << prefix << "read_energy_pJ," << prefix << "write_energy_pJ," << prefix << "refresh_energy_pJ,"
+               << prefix << "leakage_mW," << prefix << "refresh_power_W,";
+}
+
+/* ── printCsvHeader ───────────────────────────────────────────────────────── */
+void Result::printCsvHeader(ofstream &outputFile) {
+    // 9 swept-parameter columns (always first)
+    outputFile << "opt_target,capacity_kb,word_width_bits,associativity,"
+               << "temperature_K,process_node_nm,device_roadmap,internal_sensing,mem_cell_type,";
+
+    if (inputParameter->designTarget == cache) {
+        // 12 cache-level PPA columns
+        outputFile << "cache_access_mode,cache_area_mm2,"
+                   << "cache_hit_latency_ns,cache_miss_latency_ns,cache_write_latency_ns,cache_refresh_latency_ns,"
+                   << "cache_hit_energy_nJ,cache_miss_energy_nJ,cache_write_energy_nJ,cache_refresh_energy_nJ,"
+                   << "cache_leakage_mW,cache_refresh_power_W,";
+        // 41 data-array columns + 41 tag-array columns + 2 combined
+        writeArrayColumnHeaders(outputFile, "data_");
+        writeArrayColumnHeaders(outputFile, "tag_");
+        outputFile << "combined_subarray_leakage_W,combined_subarray_area_mm2";
+    } else {
+        // RAM mode: 41 array columns (no prefix); strip trailing comma via sentinel
+        writeArrayColumnHeaders(outputFile, "");
+        outputFile << "_sentinel_";
+    }
+    outputFile << endl;
+}
 
 Result::Result() {
 	// TODO Auto-generated constructor stub
@@ -752,7 +838,7 @@ void Result::printAsCache(Result &tagResult, CacheAccessMode cacheAccessMode) {
 	}
 }
 
-void Result::printToCsvFile(ofstream &outputFile) {
+void Result::printToCsvFile(ofstream &outputFile, bool writePrefix) {
 /*
 	outputFile << bank->readDynamicEnergy * 1e12 << ",";
 	outputFile << (bank->readDynamicEnergy - bank->mat.readDynamicEnergy
@@ -789,7 +875,13 @@ void Result::printToCsvFile(ofstream &outputFile) {
 					+ bank->mat.subarray.senseAmpMuxLev1.writeDynamicEnergy
 					+ bank->mat.subarray.senseAmpMuxLev2.writeDynamicEnergy) * 1e12 << endl;
 */
-	outputFile << bank->numRowMat << "," << bank->numColumnMat << "," << bank->stackedDieCount << "," << bank->numActiveMatPerColumn << "," << bank->numActiveMatPerRow << ",";
+	if (writePrefix)
+		writeSweptParamsCols(outputFile, printOptimizationTarget());
+	/* num_row_mat, num_col_mat, stacked_die_count, total_banks, total_mats, num_active_mat_* */
+	outputFile << bank->numRowMat << "," << bank->numColumnMat << "," << bank->stackedDieCount
+	           << "," << (bank->numRowMat * bank->numColumnMat * bank->stackedDieCount)
+	           << "," << (bank->numRowSubarray * bank->numColumnSubarray)
+	           << "," << bank->numActiveMatPerColumn << "," << bank->numActiveMatPerRow << ",";
 	outputFile << bank->numRowSubarray << "," << bank->numColumnSubarray << "," << bank->numActiveSubarrayPerColumn << "," << bank->numActiveSubarrayPerRow << ",";
 	outputFile << bank->mat.subarray.numRow << "," << bank->mat.subarray.numColumn << ",";
 	outputFile << bank->muxSenseAmp << "," << bank->muxOutputLev1 << "," << bank->muxOutputLev2 << ",";
@@ -986,6 +1078,7 @@ void Result::printAsCacheToCsvFile(Result &tagResult, CacheAccessMode cacheAcces
 		cacheArea = tagResult.bank->area + bank->area;	/* TO-DO: simply add them together here */
 
 		/* start printing */
+		writeSweptParamsCols(outputFile, printOptimizationTarget());
 		switch (cacheAccessMode) {
 		case normal_access_mode:
 			outputFile << "Normal" << ",";
@@ -1019,10 +1112,10 @@ void Result::printAsCacheToCsvFile(Result &tagResult, CacheAccessMode cacheAcces
         } else {
             outputFile << "0,";
         }
-		printToCsvFile(outputFile);
-		tagResult.printToCsvFile(outputFile);
-        outputFile << bank->mat.subarray.leakage + tagResult.bank->mat.subarray.leakage << ",";
-        outputFile << (bank->mat.subarray.area + tagResult.bank->mat.subarray.area) * 1e6 << ",";
+		printToCsvFile(outputFile, false);
+		tagResult.printToCsvFile(outputFile, false);
+        outputFile << bank->mat.subarray.leakage + tagResult.bank->mat.subarray.leakage << ","
+                   << (bank->mat.subarray.area + tagResult.bank->mat.subarray.area) * 1e6;
 		outputFile << endl;
 	}
 }

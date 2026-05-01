@@ -56,13 +56,12 @@ def validate(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, node=32, roadmap
             return
         
         # 4. Parse Results
-        df = pd.read_csv(csv_file, header=None)
-        # DESTINY CSV column mapping for cache
-        # Col 2: Area (mm2), Col 3: Latency (ns), Col 7: Read Energy (nJ), Col 11: Leakage (mW)
-        real_area = df.iloc[0, 1]
-        real_lat  = df.iloc[0, 2]
-        real_en   = df.iloc[0, 6]
-        real_leak = df.iloc[0, 10]
+        df = pd.read_csv(csv_file)
+        
+        real_area = df["cache_area_mm2"].iloc[0]
+        real_lat  = df["cache_hit_latency_ns"].iloc[0]
+        real_en   = df["cache_hit_energy_nJ"].iloc[0]
+        real_leak = df["cache_leakage_mW"].iloc[0]
 
         print("\n--- Physical Results (DESTINY) ---")
         print(f"  Latency: {real_lat:.4f} ns")

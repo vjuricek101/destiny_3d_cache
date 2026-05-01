@@ -18,21 +18,19 @@ plt.rcParams.update({
 })
 
 METRICS = [
-    ("Cache Area (mm^2)",         "Area",         "log"),
-    ("Cache Hit Energy (nJ)",     "Energy",        "log"),
-    ("Cache Leakage Power (mW)",  "Leakage Power", "log"),
+    ("cache_area_mm2",         "Area",         "log"),
+    ("cache_hit_energy_nJ",     "Energy",        "log"),
+    ("cache_leakage_mW",  "Leakage Power", "log"),
 ]
-LAT_COL   = "Cache Hit Latency (ns)"
-CAP_COL   = "capacity_mb"
-TECH_COL  = "memory_technology"
+LAT_COL   = "cache_hit_latency_ns"
+CAP_COL   = "capacity_kb"
+TECH_COL  = "mem_cell_type"
 TECHS     = ["SRAM", "RRAM", "eDRAM"]
 
-CAP_MB_LABELS = {
-    0.001953125: "2KB",   0.00390625: "4KB",   0.0078125: "8KB",
-    0.015625:   "16KB",   0.03125:   "32KB",   0.0625:   "64KB",
-    0.125:     "128KB",   0.25:     "256KB",   0.5:     "512KB",
-    1.0:         "1MB",   2.0:        "2MB",   4.0:       "4MB",
-    8.0:         "8MB",  16.0:       "16MB",  32.0:      "32MB",
+CAP_KB_LABELS = {
+    2: "2KB", 4: "4KB", 8: "8KB", 16: "16KB", 32: "32KB", 64: "64KB",
+    128: "128KB", 256: "256KB", 512: "512KB", 1024: "1MB", 2048: "2MB",
+    4096: "4MB", 8192: "8MB", 16384: "16MB", 32768: "32MB"
 }
 
 def pareto_frontier_2d(x, y):
@@ -63,7 +61,7 @@ def plot_pareto_shift_matrix(tech: str, df: pd.DataFrame, out_dir: str):
     Rows: Architectural parameters (Assoc, WW, Stacking, Temp)
     Cols: Tradeoffs (Lat-Area, Lat-Energy, Lat-Leakage)
     """
-    knobs = ["associativity", "word_width", "stacked_die_count", "Temperature (K)"]
+    knobs = ["associativity", "word_width_bits", "data_stacked_die_count", "temperature_K"]
     labels = ["Associativity", "Word Width", "Stacking Layers", "Temperature (K)"]
     
     # Filter for a representative fixed capacity (middle of the sweep)
@@ -73,7 +71,7 @@ def plot_pareto_shift_matrix(tech: str, df: pd.DataFrame, out_dir: str):
     
     rows, cols = len(knobs), len(METRICS)
     fig, axes = plt.subplots(rows, cols, figsize=(20, 5 * rows), constrained_layout=True)
-    fig.suptitle(f"Architectural Pareto Shift Matrix — {tech} (Capacity: {CAP_MB_LABELS.get(target_cap, target_cap)})", 
+    fig.suptitle(f"Architectural Pareto Shift Matrix — {tech} (Capacity: {CAP_KB_LABELS.get(target_cap, target_cap)})", 
                  fontsize=18, fontweight="bold")
 
     for i, (knob, klabel) in enumerate(zip(knobs, labels)):
@@ -123,7 +121,7 @@ def format_log_axis(ax, axis="x"):
 
 def plot_architectural_sensitivities(tech, df, out_dir):
     """Simple sensitivity plots for WW, Assoc, Stacking."""
-    knobs = ["word_width", "associativity", "stacked_die_count"]
+    knobs = ["word_width_bits", "associativity", "data_stacked_die_count"]
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     fig.suptitle(f"Architectural Metric Sensitivity — {tech}", fontsize=16)
     
@@ -148,7 +146,7 @@ def plot_capacity_scaling(tech, df, out_dir):
     
     ax.set_xscale('log')
     ax.set_yscale('log')
-    ax.set_xlabel("Capacity (MB)")
+    ax.set_xlabel("Capacity (KB)")
     ax.set_ylabel("Normalized Metrics")
     ax.set_title(f"Technology Scaling Trend — {tech}")
     ax.legend()

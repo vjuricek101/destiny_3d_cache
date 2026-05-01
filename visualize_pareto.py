@@ -23,13 +23,13 @@ plt.rcParams.update({
 
 # Constants
 METRICS = [
-    ("Cache Area (mm^2)",         "Area",         "log"),
-    ("Cache Hit Energy (nJ)",     "Energy",        "log"),
-    ("Cache Leakage Power (mW)",  "Leakage Power", "log"),
+    ("cache_area_mm2",         "Area",         "log"),
+    ("cache_hit_energy_nJ",     "Energy",        "log"),
+    ("cache_leakage_mW",  "Leakage Power", "log"),
 ]
-LAT_COL   = "Cache Hit Latency (ns)"
-CAP_COL   = "capacity_mb"
-TECH_COL  = "memory_technology"
+LAT_COL   = "cache_hit_latency_ns"
+CAP_COL   = "capacity_kb"
+TECH_COL  = "mem_cell_type"
 TECHS     = ["SRAM", "RRAM", "eDRAM"]
 
 # Marker shapes per technology — readable in grayscale/print
@@ -37,15 +37,11 @@ TECH_MARKERS = {"SRAM": "o", "RRAM": "s", "eDRAM": "^"}
 TECH_COLORS  = {"SRAM": "#2196F3", "RRAM": "#E91E63", "eDRAM": "#4CAF50"}
 SUB_MARKERS = {"CMOS": "o", "diode": "^", "none": "s", "HP": "o", "LOP": "^", "LSTP": "s", "EDRAM": "o"}
 
-# Power-of-2 capacities 2KB → 32MB, expressed in MB
-CAP_MB = [2**i / 1024 for i in range(-8, 6)]   # 0.002 … 32 MB (approximately)
 # Actual expected values from DESTINY sweep
-CAP_MB_LABELS = {
-    0.001953125: "2KB",   0.00390625: "4KB",   0.0078125: "8KB",
-    0.015625:   "16KB",   0.03125:   "32KB",   0.0625:   "64KB",
-    0.125:     "128KB",   0.25:     "256KB",   0.5:     "512KB",
-    1.0:         "1MB",   2.0:        "2MB",   4.0:       "4MB",
-    8.0:         "8MB",  16.0:       "16MB",  32.0:      "32MB",
+CAP_KB_LABELS = {
+    2: "2KB", 4: "4KB", 8: "8KB", 16: "16KB", 32: "32KB", 64: "64KB",
+    128: "128KB", 256: "256KB", 512: "512KB", 1024: "1MB", 2048: "2MB",
+    4096: "4MB", 8192: "8MB", 16384: "16MB", 32768: "32MB"
 }
 
 # Helpers
@@ -95,9 +91,9 @@ def add_cap_colorbar(fig, axes_list, norm, label="Capacity"):
     ax_arg = axes_list if isinstance(axes_list, list) else [axes_list]
 
     cbar = fig.colorbar(sm, ax=ax_arg, pad=0.02, fraction=0.04)
-    tick_vals = sorted(CAP_MB_LABELS.keys())
+    tick_vals = sorted(CAP_KB_LABELS.keys())
     cbar.set_ticks([v for v in tick_vals if norm.vmin <= v <= norm.vmax])
-    cbar.set_ticklabels([CAP_MB_LABELS[v] for v in tick_vals
+    cbar.set_ticklabels([CAP_KB_LABELS[v] for v in tick_vals
                          if norm.vmin <= v <= norm.vmax])
     cbar.set_label(label, fontsize=9)
 
@@ -115,7 +111,7 @@ def power2_xticks(ax, caps):
     """Set x-ticks at the exact power-of-2 capacity values present in the data."""
     tick_vals = sorted(caps)
     ax.set_xticks(tick_vals)
-    ax.set_xticklabels([CAP_MB_LABELS.get(v, f"{v:.3g}") for v in tick_vals],
+    ax.set_xticklabels([CAP_KB_LABELS.get(v, f"{v:.3g}") for v in tick_vals],
                        rotation=45, ha="right", fontsize=7.5)
 
 def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
@@ -136,8 +132,8 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
     sub_col = None
     if "CellInput_AccessType" in df.columns and df["CellInput_AccessType"].nunique() > 1:
         sub_col = "CellInput_AccessType"
-    elif "DeviceRoadmap" in df.columns and df["DeviceRoadmap"].nunique() > 1:
-        sub_col = "DeviceRoadmap"
+    elif "device_roadmap" in df.columns and df["device_roadmap"].nunique() > 1:
+        sub_col = "device_roadmap"
 
     has_sub_col = sub_col is not None
 
@@ -251,8 +247,8 @@ def plot_dominated_vs_pareto(tech: str, df_full: pd.DataFrame,
     sub_col = None
     if "CellInput_AccessType" in df_p.columns and df_p["CellInput_AccessType"].nunique() > 1:
         sub_col = "CellInput_AccessType"
-    elif "DeviceRoadmap" in df_p.columns and df_p["DeviceRoadmap"].nunique() > 1:
-        sub_col = "DeviceRoadmap"
+    elif "device_roadmap" in df_p.columns and df_p["device_roadmap"].nunique() > 1:
+        sub_col = "device_roadmap"
 
     has_sub_col = sub_col is not None
     if has_sub_col:
