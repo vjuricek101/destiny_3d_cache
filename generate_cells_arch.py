@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-generate_cells_arch.py — Architectural Sweep Variant Generator
+generate_cells_arch.py — Denser Architectural Sweep
 
 Keep physics parameters fixed at nominal values for each process node. 
-Allow for dense architectural sweep. 
 """
 
 import argparse
 import os
 import shutil
-import random
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 # Supply voltages per node (V)
 VDD_TABLE: Dict[int, float] = {22: 0.9, 32: 1.0, 45: 1.1, 65: 1.2}
@@ -32,11 +30,11 @@ MEMORY_CONFIGS = {
         "NOMINAL": {
             "ResistanceOnAtSetVoltage (ohm)":  20_000,
             "ResistanceOffAtSetVoltage (ohm)": 500_000,
-            "ReadVoltage (V)":                 (0.4),
-            "ResetVoltage (V)":                (3.0),
-            "SetVoltage (V)":                  (3.0),
-            "ResetPulse (ns)":                 (20.0),
-            "VoltageDropAccessDevice (V)":     (0.15),
+            "ReadVoltage (V)":                 0.4,
+            "ResetVoltage (V)":                3.0,
+            "SetVoltage (V)":                  3.0,
+            "ResetPulse (ns)":                 20.0,
+            "VoltageDropAccessDevice (V)":     0.15,
         }
     },
     "eDRAM": {

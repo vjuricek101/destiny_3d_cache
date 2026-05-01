@@ -7,14 +7,14 @@ import shutil
 import sys
 from typing import Dict, Any, List, Optional
 
-# ── Physics Tables ─────────────────────────────────────────────────────────────
+# Physics Tables
 VDD_TABLE: Dict[int, float] = {22: 0.9, 32: 1.0, 45: 1.1, 65: 1.2} # for RRAM high-boost-ratio check.
 VDD_EDRAM: Dict[int, float] = {65: 1.2, 45: 1.1, 32: 1.0}
 CCELL_MAX: Dict[int, float] = {65: 30e-15, 45: 25e-15, 32: 20e-15}
 RETENTION_MAX: Dict[int, float] = {65: 40.0, 45: 30.0, 32: 20.0}
 I_OFF_PER_METER: Dict[int, float] = {22: 100e-9, 32: 50e-9, 45: 20e-9, 65: 5e-9} # Used for RetentionTime vs Ccell/leakage consistency.
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# Configuration
 MEMORY_CONFIGS = {
     "SRAM": {
         "BASE_CELL_FILE": "config/sample_SRAM.cell",  # 65nm baseline
@@ -61,7 +61,7 @@ MEMORY_CONFIGS = {
 }
 
 
-# ── Utility Functions ─────────────────────────────────────────────────────────
+# Utility Functions
 
 def log_uniform(min_val: float, max_val: float) -> float:
     """Samples a value from a log-uniform distribution."""
@@ -109,7 +109,7 @@ def write_cell_file(params: Dict[str, Any], filepath: str):
                 f.write(f"-{key}: {value}\n")
 
 
-# ── Per-Node Physics Helpers ───────────────────────────────────────────────────
+# Per-Node Physics Helpers
 
 def max_retention_from_cell(c_cell: float, access_width_f: float,
                              process_node: int) -> float:
@@ -129,7 +129,7 @@ def max_retention_from_cell(c_cell: float, access_width_f: float,
     return (c_cell * vdd / 2.0) / i_leak * 1e6          # convert s → us
 
 
-# ── Physics Constraint Validation ─────────────────────────────────────────────
+# Physics Constraint Validation
 
 def valid_sram(p: Dict[str, Any]) -> bool:
     """Validates SRAM transistor sizing and sense-voltage compatibility."""
@@ -195,7 +195,7 @@ def valid_edram(p: Dict[str, Any], process_node: int) -> bool:
         return False
 
 
-# ── Generation Logic ──────────────────────────────────────────────────────────
+# Generation Logic
 
 def generate_synthetic_cells(mem_type: str, num_variants: int):
     """Generates synthetic variants for given technology."""
@@ -227,18 +227,18 @@ def generate_synthetic_cells(mem_type: str, num_variants: int):
         attempts += 1
         new_params = base_params.copy()
 
-        # ── Phase 1: Sample process node ─────────────────────────────────────
+        # Sample process node
         process_node = random.choice(valid_nodes)
         new_params["ProcessNode"] = process_node
 
-        # ── Phase 2: Sample cell parameters ──────────────────────────────────
+        # Sample cell parameters
         for key, (min_val, max_val) in ranges.items():
             if any(term in key for term in ["Resistance", "Capacitance", "Energy"]):
                 new_params[key] = log_uniform(min_val, max_val)
             else:
                 new_params[key] = random.uniform(min_val, max_val)
 
-        # ── Phase 3: Per-node clamping & FinFET quantization ────────────────
+        # Per-node clamping & FinFET quantization
         if mem_type == "SRAM":
             wn  = new_params["SRAMCellNMOSWidth (F)"]
             wp  = new_params["SRAMCellPMOSWidth (F)"]
@@ -311,7 +311,7 @@ def generate_synthetic_cells(mem_type: str, num_variants: int):
                 )
                 high_boost_count += 1
 
-        # ── Phase 4: Physics Validation ───────────────────────────────────────
+        # Physics Validation
         valid = True
         if   mem_type == "SRAM":  valid = valid_sram(new_params)
         elif mem_type == "RRAM":  valid = valid_rram(new_params)
@@ -320,21 +320,21 @@ def generate_synthetic_cells(mem_type: str, num_variants: int):
         if not valid:
             continue
 
-        # ── Write valid variant ───────────────────────────────────────────────
+        # Write valid variant
         # Embed process node in filename for traceability in run_exploration.py.
         filename = f"synthetic_variant_{i}_n{process_node}.cell"
         filepath = os.path.join(output_dir, filename)
         write_cell_file(new_params, filepath)
         i += 1
 
-    # ── Summary ───────────────────────────────────────────────────────────────
+    # Summary
     if i < num_variants:
         print(f"  Note: Only {i}/{num_variants} valid variants generated.")
     else:
         print(f"  Success: {i} variants written ({attempts} attempts).")
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
+# Main
 
 def main():
     parser = argparse.ArgumentParser(

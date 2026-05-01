@@ -4,8 +4,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
-from matplotlib.colors import LogNorm
-from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
@@ -173,7 +171,7 @@ def main(tech: str):
     out_dir = f"pareto/plots/{tech}_arch"
     os.makedirs(out_dir, exist_ok=True)
     
-    print(f"--- Generating Architectural Dashboards for {tech}_arch ---")
+    print(f"INFO: Generating dashboards for {tech}_arch")
     plot_architectural_sensitivities(tech, df, out_dir)
     plot_capacity_scaling(tech, df, out_dir)
     plot_pareto_shift_matrix(tech, df, out_dir)

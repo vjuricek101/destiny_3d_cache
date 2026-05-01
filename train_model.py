@@ -24,7 +24,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import r2_score, mean_absolute_percentage_error, mean_squared_error, mean_absolute_error
 
-# ── Column definitions ────────────────────────────────────────────────────────
+# Column definitions
 
 TARGET_COLS = [
     "Cache Hit Latency (ns)",
@@ -92,6 +92,7 @@ LOG2_CFG_COLS = [
     "associativity",
     "stacked_die_count",
 ]
+
 # Binary cfg param — just passthrough (already 0/1).
 BINARY_CFG_COLS = ["internal_sensing"]
 
@@ -104,7 +105,6 @@ LINEAR_NUMERIC_COLS = [
     "destiny_row_activation_num",
     "destiny_col_activation_num",
 ]
-
 
 # Columns irrelevant to each specific technology (beyond the shared DROP_COLS).
 _RRAM_SRAM_SHARED_DROPS = [
@@ -127,13 +127,14 @@ TECH_DROP_COLS: dict[str, list[str]] = {
     "SRAM":  _NVM_SHARED_DROPS + [
         "CellInput_DRAMCellCapacitance (F)", "CellInput_RetentionTime (us)",
         "CellInput_AccessType",
+        "cap_kb",   # redundant with capacity_mb
     ],
     "eDRAM": _NVM_SHARED_DROPS + ["CellInput_AccessType"],
     "RRAM":  _RRAM_SRAM_SHARED_DROPS + ["CellInput_MinSenseVoltage (mV)"],
 }
 
 
-# ── Model ─────────────────────────────────────────────────────────────────────
+# Model
 
 class ResidualBlock(nn.Module):
     def __init__(self, dim: int, dropout: float = 0.1):
@@ -163,76 +164,108 @@ class PPA_MLP(nn.Module):
         return self.output_head(x)
 
 
-# ── Preprocessing ─────────────────────────────────────────────────────────────
+# Preprocessing
+
+def apply_transforms(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply log transforms to specific columns based on their distribution types."""
+    # Log10 for wide-range physical parameters
+    log10_cols = [c for c in LOG_NUMERIC_COLS if c in df.columns]
+    if log10_cols:
+        df[log10_cols] = df[log10_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+        df[log10_cols] = np.log10(df[log10_cols].clip(lower=1e-12))
+
+    # Log2 for power-of-2 architectural knobs
+    log2_cols = [c for c in LOG2_CFG_COLS if c in df.columns]
+    if log2_cols:
+        df[log2_cols] = df[log2_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+        df[log2_cols] = np.log2(df[log2_cols].clip(lower=1))
+
+    return df
+
 
 def build_features(df: pd.DataFrame, extra_drop_cols: list = None) -> pd.DataFrame:
+    """Consolidated feature engineering pipeline."""
     df = df.copy()
 
+    # Force numeric types for specific physics params
     force_cols = [c for c in FORCE_NUMERIC_COLS if c in df.columns]
     if force_cols:
         df[force_cols] = df[force_cols].apply(pd.to_numeric, errors="coerce")
 
-    # Derived features
-    derived = {
-        "derived_sqrt_capacity": lambda d: np.sqrt(d["capacity_mb"]) if "capacity_mb" in d else None,
-        "derived_sqrt_area":     lambda d: np.sqrt(d["CellInput_CellArea (F^2)"]) if "CellInput_CellArea (F^2)" in d else None,
-        "derived_read_v_sq":     lambda d: d["CellInput_ReadVoltage (V)"]**2 if "CellInput_ReadVoltage (V)" in d else None,
-    }
-    for name, func in derived.items():
-        res = func(df)
-        if res is not None: df[name] = pd.to_numeric(res, errors="coerce").fillna(0)
+    # Derived physical features
+    if "capacity_mb" in df.columns:
+        df["derived_sqrt_capacity"] = np.sqrt(df["capacity_mb"])
+    if "CellInput_CellArea (F^2)" in df.columns:
+        df["derived_sqrt_area"] = np.sqrt(df["CellInput_CellArea (F^2)"])
+    if "CellInput_ReadVoltage (V)" in df.columns:
+        df["derived_read_v_sq"] = df["CellInput_ReadVoltage (V)"]**2
 
+    # Drop non-feature columns
     drop_list = set(TARGET_COLS + DROP_COLS + (extra_drop_cols or []))
-    df = df[[c for c in df.columns if c not in drop_list]]
+    df = df.drop(columns=[c for c in drop_list if c in df.columns])
 
-    cat_present = [c for c in CATEGORICAL_COLS if c in df.columns]
-    df = pd.get_dummies(df, columns=cat_present, dummy_na=False)
+    # Apply log transforms
+    df = apply_transforms(df)
 
-    log_cols = [c for c in LOG_NUMERIC_COLS if c in df.columns]
-    if log_cols:
-        df[log_cols] = df[log_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-        df[log_cols] = np.where(df[log_cols] > 0, np.log10(df[log_cols].clip(lower=1e-12)), 0.0)
+    # One-hot encoding for categorical variables
+    cat_cols = [c for c in CATEGORICAL_COLS + ["roadmap", "ProcessNode"] if c in df.columns]
+    df = pd.get_dummies(df, columns=cat_cols, dummy_na=False)
 
-    # Log2-transform power-of-2 cfg knobs (word_width, associativity, stacked_die_count)
-    log2_cols = [c for c in LOG2_CFG_COLS if c in df.columns]
-    if log2_cols:
-        df[log2_cols] = df[log2_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-        df[log2_cols] = np.where(df[log2_cols] > 0, np.log2(df[log2_cols].clip(lower=1)), 0.0)
-
-    # Binary cfg params — coerce to numeric (already 0/1)
-    bin_cols = [c for c in BINARY_CFG_COLS if c in df.columns]
-    if bin_cols:
-        df[bin_cols] = df[bin_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-
-    # Categorical encoding (One-Hot) for roadmap and node
-    cat_cols = [c for c in ["roadmap", "ProcessNode"] if c in df.columns]
-    if cat_cols:
-        df = pd.get_dummies(df, columns=cat_cols, prefix=cat_cols)
-
-    # Final cast to numeric, dropping any non-numeric leftovers
     return df.apply(pd.to_numeric, errors="coerce").fillna(0).astype(np.float32)
 
 
+def unscale_targets(y_log: np.ndarray) -> np.ndarray:
+    """Convert log10 targets back to physical units."""
+    return 10.0 ** y_log
+
+
 def log_targets(df: pd.DataFrame) -> np.ndarray:
+    """Convert physical targets to log10 space."""
     return np.log10(np.clip(df[TARGET_COLS].values.astype(np.float64), 1e-12, None)).astype(np.float32)
 
 
-# ── Training ──────────────────────────────────────────────────────────────────
+def predict(model: nn.Module, scaler: StandardScaler, feat_cols: list, df_input: pd.DataFrame) -> np.ndarray:
+    """High-level inference function that handles preprocessing and unscaling."""
+    model.eval()
+    
+    # 1. Feature Engineering
+    X = build_features(df_input)
+    
+    # 2. Column Alignment (ensure model receives same features as training)
+    # Add missing columns as 0s, and reorder to match training set
+    for col in feat_cols:
+        if col not in X.columns:
+            X[col] = 0.0
+    X = X[feat_cols]
+    
+    # 3. Scale and Predict
+    X_scaled = scaler.transform(X.values).astype(np.float32)
+    with torch.no_grad():
+        y_pred_log = model(torch.from_numpy(X_scaled)).cpu().numpy()
+        
+    return unscale_targets(y_pred_log)
+
+
+# Training
+
+def filter_physical_failures(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop DESTINY simulation failures based on physical sanity checks."""
+    initial_len = len(df)
+    df = df[
+        (df["Cache Hit Latency (ns)"] < 100) & 
+        (df["Cache Area (mm^2)"] < 1000) & 
+        (df["Cache Hit Energy (nJ)"] < 1000)
+    ]
+    if len(df) < initial_len:
+        print(f"FILTER: Dropped {initial_len - len(df)} non-physical simulation failures.")
+    return df
+
 
 def prepare_data(args):
     """Loads, filters, engineers, scales, and splits the data into 80/10/10 matrices."""
     print("DESTINY PPA Surrogate Model Training:")
     df_raw = pd.read_csv(args.data).dropna(subset=TARGET_COLS)
-    
-    # Physical Filter: Drop DESTINY simulation failures (e.g. Latency > 100ns or overflow)
-    initial_len = len(df_raw)
-    df_raw = df_raw[
-        (df_raw["Cache Hit Latency (ns)"] < 100) & 
-        (df_raw["Cache Area (mm^2)"] < 1000) & 
-        (df_raw["Cache Hit Energy (nJ)"] < 1000)
-    ]
-    if len(df_raw) < initial_len:
-        print(f"  [FILTER] Dropped {initial_len - len(df_raw)} non-physical simulation failures (Latency > 100ns, etc.)")
+    df_raw = filter_physical_failures(df_raw)
     
     print(f"  Final training set size: {df_raw.shape}")
 
@@ -260,7 +293,8 @@ def prepare_data(args):
     print(f"\nSplit: {len(idx_train)} train / {len(idx_val)} val / {len(idx_test)} test")
 
     # Feature engineering
-    extra_drops = (["memory_technology"] if args.tech != "ALL" else []) + TECH_DROP_COLS.get(args.tech, [])
+    tech_list = ["memory_technology"] if args.tech != "ALL" else []
+    extra_drops = tech_list + TECH_DROP_COLS.get(args.tech, [])
     X_all_df = build_features(df_raw, extra_drop_cols=extra_drops)
 
     # Drop perfectly correlated columns
@@ -324,8 +358,10 @@ def save_and_evaluate(model, X_test, y_test, device, args, scaler, feature_names
     """Evaluates testing holdouts, computes unscaled metrics, and saves model artifacts."""
     model.eval()
     with torch.no_grad():
-        y_pred = 10.0 ** model(torch.from_numpy(X_test).to(device)).cpu().numpy()
-    y_true = 10.0 ** y_test
+        y_pred_log = model(torch.from_numpy(X_test).to(device)).cpu().numpy()
+    
+    y_pred = unscale_targets(y_pred_log)
+    y_true = unscale_targets(y_test)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -425,7 +461,6 @@ def train(args, trial=None):
                            for xb, yb in val_loader) / len(X_val)
 
         if trial is not None:
-            import optuna
             trial.report(val_loss, epoch)
             if trial.should_prune():
                 raise optuna.TrialPruned()
@@ -453,7 +488,7 @@ def train(args, trial=None):
     return save_and_evaluate(model, X_test, y_test, device, args, scaler, feats, log_rows)
 
 
-# ── Inference helper ──────────────────────────────────────────────────────────
+# Inference helper
 
 def load_model(output_dir: str = "model_output"):
     """Load a saved model for inference. Returns (model, scaler, feat_cols)."""
@@ -466,15 +501,15 @@ def load_model(output_dir: str = "model_output"):
     return model.eval(), scaler, feat_cols
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# CLI
 
 def parse_args(args=None):
     p = argparse.ArgumentParser(
         description="Train DESTINY PPA surrogate model",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--output-dir",   default="model_output", help="Directory for saved artifacts.")
-    p.add_argument("--tech",         default="ALL",          help="Filter to one memory technology (SRAM, RRAM, eDRAM).")
+    p.add_argument("--output-dir",   default="model_output")
+    p.add_argument("--tech",         default="ALL",          help="SRAM, RRAM, eDRAM, or ALL")
     p.add_argument("--epochs",       type=int,   default=300)
     p.add_argument("--batch-size",   type=int,   default=1024)
     p.add_argument("--lr",           type=float, default=1e-3)
@@ -482,12 +517,12 @@ def parse_args(args=None):
     p.add_argument("--n-blocks",     type=int,   default=6)
     p.add_argument("--dropout",      type=float, default=0.1)
     p.add_argument("--patience",     type=int,   default=50)
-    p.add_argument("--sample-size",  type=int,   default=0)
+    p.add_argument("--sample-size",  type=int,   default=0, help="Debug with smaller N.")
     p.add_argument("--log-interval", type=int,   default=20)
-    p.add_argument("--alpha", type=float, nargs=4, default=[1.5, 1.0, 3.0, 1.0],
-                   help="Loss weights for [Latency, Area, Energy, Leakage].")
-    p.add_argument("--from-study", default=None, help="Load optimized hyperparameters from an Optuna study.")
-    p.add_argument("--arch", action="store_true", help="Use architectural sweep data source.")
+    p.add_argument("--alpha", type=float, nargs=4, default=[1.0, 1.0, 1.0, 1.0],
+                   help="Loss weights: [Lat, Area, Energy, Leak].")
+    p.add_argument("--from-study", default=None, help="Load optimized HP from Optuna study.")
+    p.add_argument("--arch", action="store_true", help="Use architectural sweep data.")
     return p.parse_args(args)
 
 
@@ -503,7 +538,8 @@ def load_params_from_study(args):
         if "alpha_lat" in best:
             args.alpha = [best.get(f"alpha_{m}", 1.0) for m in ["lat", "area", "energy", "leak"]]
     except Exception as e:
-        print(f"  [WARNING] Study '{args.from_study}' load failed: {e}")
+        print(f"WARNING: Study '{args.from_study}' load failed: {e}")
+
 
 if __name__ == "__main__":
     args = parse_args()

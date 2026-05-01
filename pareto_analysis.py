@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
-# ── Pareto Algorithms ──────────────────────────────────────────────────────────
+# Pareto Algorithms
 
 def is_pareto_efficient(costs):
     """O(n^2) Pareto frontier for N objectives."""
@@ -22,7 +22,7 @@ def is_pareto_efficient(costs):
         if np.any(dominated): is_efficient[i] = False
     return is_efficient
 
-# ── Utility Functions ─────────────────────────────────────────────────────────
+# Utility Functions
 
 CELL_CACHE = {}
 def parse_cell_file(filepath):
@@ -70,7 +70,7 @@ def parse_metadata(stem, tech, is_arch=False):
     if 'cap_kb' in meta: meta['capacity_mb'] = float(meta['cap_kb']) / 1024.0
     return meta
 
-# ── Data Loading ──────────────────────────────────────────────────────────────
+# Data Loading
 
 def load_sim_csv(results_path, tech, is_arch=False):
     """Loads a single simulation CSV and attaches metadata/cell physics."""
@@ -110,7 +110,7 @@ def load_sim_csv(results_path, tech, is_arch=False):
         # print(f"Error loading {results_path}: {e}")
         return None
 
-# ── Orchestration ─────────────────────────────────────────────────────────────
+# Orchestration
 
 def process_results(tech, is_arch, only_full):
     suffix = "_arch" if is_arch else ""
@@ -130,7 +130,7 @@ def process_results(tech, is_arch, only_full):
         valid_dfs = [d for d in dfs if d is not None]
         if valid_dfs:
             all_dfs.append(pd.concat(valid_dfs, ignore_index=True))
-        print(f"  Processed {min(i + chunk_size, len(csv_files))}/{len(csv_files)}...")
+        print(f"PROGRESS: Processed {min(i + chunk_size, len(csv_files))}/{len(csv_files)}...")
 
     if not all_dfs:
         print(f"ERROR: No valid data found in {res_dir}")

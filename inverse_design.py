@@ -128,13 +128,14 @@ if __name__ == "__main__":
     opt = UnifiedOptimizer(args.tech, is_arch=args.arch)
     design, ppa = opt.optimize(targets, context)
 
-    print(f"\n--- Optimized {args.tech} Design (Arch Mode: {args.arch}) ---")
+    print(f"\nINVERSE DESIGN: {args.tech} (Arch Mode: {args.arch})")
     print(f"Node: {args.node}nm | Roadmap: {args.roadmap}")
     for k, v in design.items():
         if "kb" in k or "width" in k or "assoc" in k or "die" in k:
-            print(f"{k:20}: {v}")
+            print(f"  {k:18}: {v}")
     
-    print("\n--- Predicted Performance vs Targets ---")
+    print("\nPREDICTED PERFORMANCE:")
     for k, v in ppa.items():
-        target_val = targets.get(f"{k} ({'ns' if k=='Latency' else 'mm^2' if k=='Area' else 'nJ' if k=='Energy' else 'mW'})", "-")
-        print(f"{k:10}: {v:10.4f}  (Target: {target_val})")
+        unit = 'ns' if k=='Latency' else 'mm^2' if k=='Area' else 'nJ' if k=='Energy' else 'mW'
+        target_val = targets.get(f"{k} ({unit})", "-")
+        print(f"  {k:10}: {v:10.4f}  (Target: {target_val})")

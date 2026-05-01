@@ -85,13 +85,15 @@ def main():
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=10)
     )
     
-    print(f"Starting tuning study '{args.study_name}' (Arch Mode: {args.arch})")
-    print(f"Data source: {data_path}")
+    print(f"TUNING: Study '{args.study_name}' (Arch Mode: {args.arch})")
+    print(f"DATA:   {data_path}")
     
     study.optimize(lambda t: objective(t, config), n_trials=args.trials)
     
-    print(f"\nBest Loss: {study.best_value:.6f} | Best Trial: {study.best_trial.number}")
-    for k, v in study.best_params.items(): print(f"  {k:15}: {v}")
+    print(f"\nBest Loss: {study.best_value:.6f} | Trial: {study.best_trial.number}")
+    for k, v in study.best_params.items():
+        print(f"  {k:15}: {v}")
+
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,5 @@
 import argparse
 import os
-import warnings
 
 import matplotlib
 matplotlib.use("Agg")
@@ -11,7 +10,7 @@ from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
-# ── Style ──────────────────────────────────────────────────────────────────────
+# Style
 plt.rcParams.update({
     "font.family":      "DejaVu Sans",
     "axes.titlesize":   13,
@@ -22,7 +21,7 @@ plt.rcParams.update({
     "figure.dpi":       150,
 })
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# Constants
 METRICS = [
     ("Cache Area (mm^2)",         "Area",         "log"),
     ("Cache Hit Energy (nJ)",     "Energy",        "log"),
@@ -49,7 +48,7 @@ CAP_MB_LABELS = {
     8.0:         "8MB",  16.0:       "16MB",  32.0:      "32MB",
 }
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# Helpers
 
 def pareto_frontier_2d(x: np.ndarray, y: np.ndarray) -> np.ndarray:
     """
@@ -483,7 +482,7 @@ def main(pareto_csv: str):
     out_root = "pareto/plots"
     os.makedirs(out_root, exist_ok=True)
 
-    # ── Per-technology plots ──────────────────────────────────────────────────
+    # Per-technology plots
     for tech in df_pareto[TECH_COL].unique():
         tech_dir = os.path.join(out_root, tech)
         os.makedirs(tech_dir, exist_ok=True)
@@ -502,7 +501,7 @@ def main(pareto_csv: str):
             print(f"  Skipping dominated overlay ({full_csv} not found). "
                   "Run: python pareto_analysis.py --only-full")
 
-    # ── Global comparison plots ───────────────────────────────────────────────
+    # Global comparison plots
     print("\n[Global] Generating cross-technology comparison plots...")
     for col, label, scale in METRICS:
         safe = label.replace(" ", "_").replace("²", "2").replace("(", "").replace(")", "").replace("/", "_")
@@ -513,7 +512,7 @@ def main(pareto_csv: str):
 
     plot_scaling_comparison(df_pareto, os.path.join(out_root, "global_scaling_comparison.png"))
 
-    # ── Summary stats ─────────────────────────────────────────────────────────
+    # Summary stats
     save_summary_stats(df_pareto, os.path.join(out_root, "summary_stats.csv"))
 
     print("\nAll plots generated.")
