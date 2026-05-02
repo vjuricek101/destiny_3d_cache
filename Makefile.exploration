@@ -9,6 +9,8 @@ TYPE ?= ALL
 NUM_VARIANTS ?= 2000
 # Technologies handled by the ALL logic
 TECHS = SRAM RRAM eDRAM
+# Optuna study name — shared between tune and train so best HPs are picked up
+STUDY_NAME ?= destiny_$(TYPE)$(SUFFIX)
 
 # --- Paths ---
 RAM_DIR = /dev/shm/vjuricek_destiny_tmp
@@ -36,10 +38,9 @@ else
 	ARCH_FLAG =
 endif
 
-VALIDATE_SCRIPT  = validate_model.py
 
 # --- Main Targets ---
-.PHONY: help all exploration generate explore analyze plot train validate ml_pipeline clean clean_all
+.PHONY: help all exploration generate explore analyze plot train ml_pipeline clean clean_studies clean_all
 
 help:
 	@echo "DESTINY Exploration Pipeline"
@@ -50,9 +51,10 @@ help:
 	@echo "  arch        Architectural sweep (Fixed Physics), uses Cartesian grid."
 	@echo ""
 	@echo "Main Targets:"
-	@echo "  all          Run everything: exploration, then ml_pipeline"
-	@echo "  exploration  Run generate -> explore -> analyze -> plot"
-	@echo "  ml_pipeline  Train and validate surrogate model(s)"
+	@echo "  all            Run everything: exploration, then ml_pipeline"
+	@echo "  exploration    Run generate -> explore -> analyze -> plot"
+	@echo "  ml_pipeline    Train and validate surrogate model(s)"
+	@echo "  clean_studies  Delete all Optuna tuning studies from the DB"
 	@echo ""
 
 # Orchestration
@@ -98,29 +100,42 @@ ml_pipeline:
 ifeq ($(TYPE), ALL)
 	@for tech in $(TECHS); do \
 		echo "--- Running ML Pipeline for $$tech ($(MODE)) ---"; \
-		$(MAKE) -f Makefile.exploration tune train validate TYPE=$$tech MODE=$(MODE); \
+		$(MAKE) -f Makefile.exploration tune train TYPE=$$tech MODE=$(MODE); \
 	done
 else
-	@$(MAKE) -f Makefile.exploration tune train validate TYPE=$(TYPE) MODE=$(MODE)
+	@$(MAKE) -f Makefile.exploration tune train TYPE=$(TYPE) MODE=$(MODE)
 endif
 
 tune:
-	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) ---"
-	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --trials 10
+	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) (study: $(STUDY_NAME)) ---"
+	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --trials 50 --study-name $(STUDY_NAME)
 
 train:
-	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) ---"
-	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG)
+	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (from study: $(STUDY_NAME)) ---"
+	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --from-study $(STUDY_NAME)
 
-validate:
-	@echo "--- Validating Surrogate Model for $(TYPE)$(SUFFIX) ---"
-	python3 $(VALIDATE_SCRIPT) --tech $(TYPE)
 
 design:
 	@echo "--- Running Inverse Design for $(TYPE)$(SUFFIX) ---"
 	python3 $(INV_DESIGN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG)
 
 # --- Cleaning ---
+
+clean_studies:
+	@echo "--- Deleting all Optuna tuning studies from optuna_study.db ---"
+	@python3 -c "
+import optuna, sys
+optuna.logging.set_verbosity(optuna.logging.WARNING)
+storage = 'sqlite:///optuna_study.db'
+summaries = optuna.get_all_study_summaries(storage=storage)
+if not summaries:
+    print('No studies found — DB is already clean.')
+    sys.exit(0)
+for s in summaries:
+    optuna.delete_study(study_name=s.study_name, storage=storage)
+    print(f'Deleted: {s.study_name}')
+print(f'Done. {len(summaries)} study/studies removed.')
+"
 
 clean:
 ifeq ($(TYPE), ALL)
@@ -139,6 +154,6 @@ else
 	rm -rf pareto/plots/$(TYPE)$(SUFFIX)
 endif
 
-clean_all:
+clean_all: clean_studies
 	@echo "Cleaning up ALL generated outputs across ALL modes..."
 	rm -rf synthetic_cells/ exploration_results/ pareto/ model_output/ $(RAM_DIR)/

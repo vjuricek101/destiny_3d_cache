@@ -10,113 +10,16 @@ from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
-# Style
-plt.rcParams.update({
-    "font.family":      "DejaVu Sans",
-    "axes.titlesize":   13,
-    "axes.labelsize":   11,
-    "legend.fontsize":  9,
-    "xtick.labelsize":  9,
-    "ytick.labelsize":  9,
-    "figure.dpi":       150,
-})
-
-# Constants
-METRICS = [
-    ("cache_area_mm2",         "Area",         "log"),
-    ("cache_hit_energy_nJ",     "Energy",        "log"),
-    ("cache_leakage_mW",  "Leakage Power", "log"),
-]
-LAT_COL   = "cache_hit_latency_ns"
-CAP_COL   = "capacity_kb"
-TECH_COL  = "mem_cell_type"
-TECHS     = ["SRAM", "RRAM", "eDRAM"]
-
-# Marker shapes per technology — readable in grayscale/print
-TECH_MARKERS = {"SRAM": "o", "RRAM": "s", "eDRAM": "^"}
-TECH_COLORS  = {"SRAM": "#2196F3", "RRAM": "#E91E63", "eDRAM": "#4CAF50"}
-SUB_MARKERS = {"CMOS": "o", "diode": "^", "none": "s", "HP": "o", "LOP": "^", "LSTP": "s", "EDRAM": "o"}
-
-# Actual expected values from DESTINY sweep
-CAP_KB_LABELS = {
-    2: "2KB", 4: "4KB", 8: "8KB", 16: "16KB", 32: "32KB", 64: "64KB",
-    128: "128KB", 256: "256KB", 512: "512KB", 1024: "1MB", 2048: "2MB",
-    4096: "4MB", 8192: "8MB", 16384: "16MB", 32768: "32MB"
-}
-
-# Helpers
-
-def pareto_frontier_2d(x: np.ndarray, y: np.ndarray) -> np.ndarray:
-    """
-    Return boolean mask of non-dominated points (minimizing both x and y).
-    A point is dominated if another point is ≤ in both dimensions and < in at least one.
-    """
-    n = len(x)
-    dominated = np.zeros(n, dtype=bool)
-    for i in range(n):
-        if dominated[i]:
-            continue
-        # Check whether any other point dominates i
-        dominated[i] = np.any((x <= x[i]) & (y <= y[i]) &
-                              ((x < x[i]) | (y < y[i])))
-    return ~dominated
-
-def pareto_step_line(x: np.ndarray, y: np.ndarray):
-    """
-    Sort Pareto-optimal points and return a stepped-line (x, y) path
-    so the frontier can be drawn as a solid staircase instead of dots.
-    """
-    order = np.argsort(x)
-    xs, ys = x[order], y[order]
-    # Build staircase
-    sx, sy = [xs[0]], [ys[0]]
-    for xi, yi in zip(xs[1:], ys[1:]):
-        sy.append(sy[-1])   # horizontal step
-        sx.append(xi)
-        sx.append(xi)       # vertical step
-        sy.append(yi)
-    return np.array(sx), np.array(sy)
-
-def cap_colormap(caps: pd.Series):
-    """Return a LogNorm and the sorted unique capacity values."""
-    uniq = sorted(caps.unique())
-    vmin, vmax = min(uniq), max(uniq)
-    norm = LogNorm(vmin=vmin, vmax=vmax)
-    return norm, uniq
-
-def add_cap_colorbar(fig, axes_list, norm, label="Capacity"):
-    """Add a colorbar to the right of the rightmost panel without overlapping."""
-    sm = plt.cm.ScalarMappable(cmap="viridis", norm=norm)
-    sm.set_array([])
-    ax_arg = axes_list if isinstance(axes_list, list) else [axes_list]
-
-    cbar = fig.colorbar(sm, ax=ax_arg, pad=0.02, fraction=0.04)
-    tick_vals = sorted(CAP_KB_LABELS.keys())
-    cbar.set_ticks([v for v in tick_vals if norm.vmin <= v <= norm.vmax])
-    cbar.set_ticklabels([CAP_KB_LABELS[v] for v in tick_vals
-                         if norm.vmin <= v <= norm.vmax])
-    cbar.set_label(label, fontsize=9)
-
-def format_log_axis(ax, axis="both"):
-    """Replace default 1e-X notation with plain decimal numbers."""
-    fmt = ticker.LogFormatterSciNotation(labelOnlyBase=False)
-    if axis in ("x", "both"):
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(
-            lambda val, pos: f"{val:g}"))
-    if axis in ("y", "both"):
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(
-            lambda val, pos: f"{val:g}"))
-
-def power2_xticks(ax, caps):
-    """Set x-ticks at the exact power-of-2 capacity values present in the data."""
-    tick_vals = sorted(caps)
-    ax.set_xticks(tick_vals)
-    ax.set_xticklabels([CAP_KB_LABELS.get(v, f"{v:.3g}") for v in tick_vals],
-                       rotation=45, ha="right", fontsize=7.5)
+from destiny_utils import (
+    METRICS, LAT_COL, CAP_COL, TECH_COL, TECHS,
+    TECH_MARKERS, TECH_COLORS, SUB_MARKERS, CAP_KB_LABELS,
+    pareto_frontier_2d, pareto_step_line,
+    cap_colormap, add_cap_colorbar, format_log_axis, power2_xticks,
+)
 
 def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
     """
-    3-panel figure: Area, Energy, Leakage vs Latency.
+    3-panel figure: Write EDP, Area, Leakage vs Latency.
     Points colored by capacity with a shared colorbar to the right.
     A per-capacity Pareto frontier line is drawn for each capacity tier.
     If multiple AccessTypes exist, creates multiple rows filtering by type.
@@ -137,15 +40,18 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
 
     has_sub_col = sub_col is not None
 
+    plot_metrics = [m for m in METRICS if m[0] != LAT_COL]
+    n_cols = len(plot_metrics)
+
     if has_sub_col:
         sub_types = sorted(df[sub_col].dropna().unique())
         rows = 1 + len(sub_types)
-        fig, axes = plt.subplots(rows, 3, figsize=(17, 4.5 * rows), constrained_layout=True)
+        fig, axes = plt.subplots(rows, n_cols, figsize=(5.5 * n_cols, 4.5 * rows), constrained_layout=True)
     else:
-        fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), constrained_layout=True)
+        fig, axes = plt.subplots(1, n_cols, figsize=(5.5 * n_cols, 5.5), constrained_layout=True)
         axes = np.array([axes])
 
-    fig.suptitle(f"{tech} — Pareto Tradeoffs", fontsize=16 if has_sub_col else 14, fontweight="bold")
+    fig.suptitle(f"{tech} — Pareto Tradeoffs\n(single-mat configs excluded from plot)", fontsize=16 if has_sub_col else 14, fontweight="bold")
 
     for i in range(axes.shape[0]):
         if has_sub_col:
@@ -160,11 +66,10 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
             df_row = df.copy()
             row_title = ""
 
-        for j, (ycol, ylabel, yscale) in enumerate(METRICS):
+        for j, (ycol, ylabel, yscale) in enumerate(plot_metrics):
             ax = axes[i, j]
             
-            cols = [LAT_COL, ycol, CAP_COL]
-            if has_sub_col: cols.append(sub_col)
+            cols = list(set([LAT_COL, ycol, CAP_COL] + ([sub_col] if has_sub_col else [])))
             sub = df_row[cols].dropna(subset=[LAT_COL, ycol, CAP_COL])
             
             if sub.empty:
@@ -177,7 +82,7 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
             # Scatter: all points coloured by capacity
             if has_sub_col:
                 for row_st in sorted(sub[sub_col].dropna().unique()):
-                    st_mask = sub[sub_col] == row_st
+                    st_mask = (sub[sub_col] == row_st).values
                     if st_mask.sum() == 0: continue
                     ax.scatter(x[st_mask], y[st_mask],
                                c=sub[CAP_COL].values[st_mask], norm=norm, cmap=cmap,
@@ -250,16 +155,19 @@ def plot_dominated_vs_pareto(tech: str, df_full: pd.DataFrame,
     elif "device_roadmap" in df_p.columns and df_p["device_roadmap"].nunique() > 1:
         sub_col = "device_roadmap"
 
+    plot_metrics = [m for m in METRICS if m[0] != LAT_COL]
+    n_cols = len(plot_metrics)
+
     has_sub_col = sub_col is not None
     if has_sub_col:
         sub_types = sorted(df_p[sub_col].dropna().unique())
         rows = 1 + len(sub_types)
-        fig, axes = plt.subplots(rows, 3, figsize=(17, 4.5 * rows), constrained_layout=True)
+        fig, axes = plt.subplots(rows, n_cols, figsize=(5.5 * n_cols, 4.5 * rows), constrained_layout=True)
     else:
-        fig, axes = plt.subplots(1, 3, figsize=(17, 5.5), constrained_layout=True)
+        fig, axes = plt.subplots(1, n_cols, figsize=(5.5 * n_cols, 5.5), constrained_layout=True)
         axes = np.array([axes])  # Make 2D for consistent indexing
 
-    fig.suptitle(f"{tech} — Full Design Space vs Pareto Frontier", 
+    fig.suptitle(f"{tech} — Full Design Space vs Pareto Frontier\n(single-mat configs excluded from plot)", 
                  fontsize=16 if has_sub_col else 14, fontweight="bold")
 
     for i in range(axes.shape[0]):
@@ -278,12 +186,10 @@ def plot_dominated_vs_pareto(tech: str, df_full: pd.DataFrame,
             df_f_row = df_f.copy()
             row_title = ""
 
-        for j, (ycol, ylabel, yscale) in enumerate(METRICS):
+        for j, (ycol, ylabel, yscale) in enumerate(plot_metrics):
             ax = axes[i, j]
             
-            # Sub-select columns safely
-            cols = [LAT_COL, ycol, CAP_COL]
-            if has_sub_col: cols.append(sub_col)
+            cols = list(set([LAT_COL, ycol, CAP_COL] + ([sub_col] if has_sub_col else [])))
             
             valid_f = df_f_row[cols].dropna(subset=[LAT_COL, ycol, CAP_COL])
             valid_p_row = df_p_row[cols].dropna(subset=[LAT_COL, ycol, CAP_COL])
@@ -361,7 +267,7 @@ def plot_global_comparison(df: pd.DataFrame, metric_col: str, ylabel: str,
     caps_sorted = sorted(df[CAP_COL].unique())
 
     fig, axes = plt.subplots(1, 1 + len(TECHS), figsize=(22, 5.5), sharex=True, sharey=True, constrained_layout=True)
-    fig.suptitle(f"Global Technology Comparison — {ylabel} vs Hit Latency", fontsize=16, fontweight="bold")
+    fig.suptitle(f"Global Technology Comparison — {ylabel} vs Hit Latency\n(single-mat configs excluded from plot)", fontsize=16, fontweight="bold")
 
     for i, ax in enumerate(axes):
         is_all_tech = (i == 0)
@@ -438,7 +344,7 @@ def plot_scaling_comparison(df: pd.DataFrame, out_path: str):
     power2_xticks(ax, best[CAP_COL].unique())
     ax.set_xlabel("Cache Capacity (log₂ scale)", fontsize=11)
     ax.set_ylabel("Min Cache Hit Latency (ns)", fontsize=11)
-    ax.set_title("Technology Scaling Comparison — Best Achievable Latency", fontsize=13,
+    ax.set_title("Technology Scaling Comparison — Best Achievable Latency\n(single-mat configs excluded from plot)", fontsize=13,
                  fontweight="bold")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=10)
@@ -474,6 +380,9 @@ def main(pareto_csv: str):
 
     print(f"Loading Pareto dataset: {pareto_csv}")
     df_pareto = pd.read_csv(pareto_csv)
+    
+    # Filter out single-mat configs for plotting
+    df_pareto = df_pareto[df_pareto["data_total_mats"] > 1].copy()
 
     out_root = "pareto/plots"
     os.makedirs(out_root, exist_ok=True)
@@ -492,6 +401,7 @@ def main(pareto_csv: str):
         if os.path.exists(full_csv):
             print(f"  Loading full data: {full_csv}")
             df_full = pd.read_csv(full_csv)
+            df_full = df_full[df_full["data_total_mats"] > 1].copy()
             plot_dominated_vs_pareto(tech, df_full, df_pareto, tech_dir)
         else:
             print(f"  Skipping dominated overlay ({full_csv} not found). "
@@ -500,6 +410,8 @@ def main(pareto_csv: str):
     # Global comparison plots
     print("\n[Global] Generating cross-technology comparison plots...")
     for col, label, scale in METRICS:
+        if col == LAT_COL:
+            continue
         safe = label.replace(" ", "_").replace("²", "2").replace("(", "").replace(")", "").replace("/", "_")
         plot_global_comparison(
             df_pareto, col, label, scale,

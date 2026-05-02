@@ -28,11 +28,11 @@ from sklearn.metrics import r2_score, mean_absolute_percentage_error, mean_squar
 
 TARGET_COLS = [
     "cache_hit_latency_ns",
+    "cache_write_energy_nJ",
     "cache_area_mm2",
-    "cache_hit_energy_nJ",
     "cache_leakage_mW",
 ]
-TARGET_LABELS = ["Latency (ns)", "Area (mm^2)", "Energy (nJ)", "Leakage (mW)"]
+TARGET_LABELS = ["Read Latency (ns)", "Write Energy (nJ)", "Area (mm^2)", "Leakage (mW)"]
 
 DROP_COLS = [
     "variant_name",
@@ -559,13 +559,15 @@ if __name__ == "__main__":
     args = parse_args()
     load_params_from_study(args)
 
-    suffix = "_arch" if args.arch else ""
-    args.data = (f"pareto/{args.tech}{suffix}/{args.tech}{suffix}_full_data.csv"
-                 if args.tech != "ALL" else "pareto/full_data.csv")
+    arch_suffix = "_arch" if args.arch else ""
+    if args.tech != "ALL":
+        args.data = f"pareto/{args.tech}{arch_suffix}/{args.tech}{arch_suffix}_full_data.csv"
+    else:
+        args.data = f"pareto/full_data.csv"
 
     if args.output_dir == "model_output":
-        suffix = "_full" if args.data and "full" in args.data else ""
-        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}{suffix}")
+        out_suffix = f"{arch_suffix}_full"
+        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}{out_suffix}")
 
     if not os.path.exists(args.data):
         sys.exit(f"ERROR: Training data not found: {args.data}")

@@ -68,7 +68,8 @@ def process_results(tech, is_arch, only_full):
     if only_full: return
 
     # Calculation logic for filters
-    ppa_cols = ["cache_hit_latency_ns", "cache_area_mm2", "cache_hit_energy_nJ", "cache_leakage_mW"]
+    ppa_cols = ["cache_hit_latency_ns", "cache_write_energy_nJ", "cache_area_mm2", "cache_leakage_mW"]
+
     pareto_frames = []
     
     print(f"  Calculating Pareto frontiers...")

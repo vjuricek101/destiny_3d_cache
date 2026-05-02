@@ -19,7 +19,7 @@ TEMPERATURE_FROM_STACK: Dict[str, Dict[int, int]] = {
 }
 
 BITLINE_LEAKAGE_TOLERANCE = 1   # from constant.h
-MAX_WORKERS: int = 64
+MAX_WORKERS: int = 128
 
 CAPACITY_SWEEP_KB: List[int] = [2**i for i in range(1, 16)]   # 2 KB – 32 MB
 
@@ -193,7 +193,7 @@ def build_simulation_args(
         cell_params  = parse_cell_params(cell_path)
 
         for cap_kb in CAPACITY_SWEEP_KB:
-            valid_stack_counts = [1]
+            valid_stack_counts = [1, 2, 4]
 
             for stacked in valid_stack_counts:
                 temperature = TEMPERATURE_FROM_STACK[mem_type][stacked]

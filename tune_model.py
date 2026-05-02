@@ -39,10 +39,10 @@ def objective(trial, config):
         return np.mean((np.log10(np.clip(true, 1e-12, None)) - np.log10(np.clip(pred, 1e-12, None)))**2)
 
     total_error = sum([
-        log10_mse(y_true["Latency (ns)"], y_pred["Latency (ns)"]),
-        log10_mse(y_true["Area (mm^2)"],  y_pred["Area (mm^2)"]),
-        log10_mse(y_true["Energy (nJ)"],  y_pred["Energy (nJ)"]),
-        log10_mse(y_true["Leakage (mW)"], y_pred["Leakage (mW)"])
+        log10_mse(y_true["Read Latency (ns)"], y_pred["Read Latency (ns)"]),
+        log10_mse(y_true["Area (mm^2)"],       y_pred["Area (mm^2)"]),
+        log10_mse(y_true["Write Energy (nJ)"], y_pred["Write Energy (nJ)"]),
+        log10_mse(y_true["Leakage (mW)"],      y_pred["Leakage (mW)"])
     ])
 
     return total_error

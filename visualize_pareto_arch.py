@@ -1,183 +1,170 @@
 import argparse
 import os
+import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 import numpy as np
-import pandas as pd
+from matplotlib.lines import Line2D
 
-plt.rcParams.update({
-    "font.family":      "DejaVu Sans",
-    "axes.titlesize":   13,
-    "axes.labelsize":   11,
-    "legend.fontsize":  9,
-    "xtick.labelsize":  9,
-    "ytick.labelsize":  9,
-    "figure.dpi":       150,
-})
+from destiny_utils import (
+    METRICS, LAT_COL, CAP_COL, TECH_COL, TECHS,
+    TECH_MARKERS, TECH_COLORS, SUB_MARKERS, CAP_KB_LABELS,
+    pareto_frontier_2d, pareto_step_line,
+    cap_colormap, add_cap_colorbar, format_log_axis, power2_xticks,
+)
+from visualize_pareto import (
+    plot_tech_3panel,
+    plot_dominated_vs_pareto,
+    plot_global_comparison,
+    plot_scaling_comparison,
+    save_summary_stats
+)
 
-METRICS = [
-    ("cache_area_mm2",         "Area",         "log"),
-    ("cache_hit_energy_nJ",     "Energy",        "log"),
-    ("cache_leakage_mW",  "Leakage Power", "log"),
-]
-LAT_COL   = "cache_hit_latency_ns"
-CAP_COL   = "capacity_kb"
-TECH_COL  = "mem_cell_type"
-TECHS     = ["SRAM", "RRAM", "eDRAM"]
-
-CAP_KB_LABELS = {
-    2: "2KB", 4: "4KB", 8: "8KB", 16: "16KB", 32: "32KB", 64: "64KB",
-    128: "128KB", 256: "256KB", 512: "512KB", 1024: "1MB", 2048: "2MB",
-    4096: "4MB", 8192: "8MB", 16384: "16MB", 32768: "32MB"
-}
-
-def pareto_frontier_2d(x, y):
-    """Return mask of non-dominated points minimizing both x and y."""
-    n = len(x)
-    dominated = np.zeros(n, dtype=bool)
-    for i in range(n):
-        if dominated[i]: continue
-        # A point is dominated if another point is <= in both and < in at least one
-        dominated[i] = np.any((x <= x[i]) & (y <= y[i]) & ((x < x[i]) | (y < y[i])))
-    return ~dominated
-
-def pareto_step_line(x, y):
-    """Create a staircase path for a 2D Pareto frontier."""
-    order = np.argsort(x)
-    xs, ys = x[order], y[order]
-    sx, sy = [xs[0]], [ys[0]]
-    for xi, yi in zip(xs[1:], ys[1:]):
-        sy.append(sy[-1])
-        sx.append(xi)
-        sx.append(xi)
-        sy.append(yi)
-    return np.array(sx), np.array(sy)
-
-def plot_pareto_shift_matrix(tech: str, df: pd.DataFrame, out_dir: str):
+def plot_arch_parameter_impact(tech: str, df: pd.DataFrame, out_dir: str):
     """
-    A grid of plots showing how the Pareto frontier shifts per architectural knob.
-    Rows: Architectural parameters (Assoc, WW, Stacking, Temp)
-    Cols: Tradeoffs (Lat-Area, Lat-Energy, Lat-Leakage)
+    For each arch param, plot 1x4 panels (Latency, Write Energy, Area, Leakage vs Param).
+    Colored by capacity, shaped by device_roadmap. Both axes log scaled.
     """
-    knobs = ["associativity", "word_width_bits", "data_stacked_die_count", "temperature_K"]
-    labels = ["Associativity", "Word Width", "Stacking Layers", "Temperature (K)"]
+    params = {
+        "word_width_bits": "Word Width (bits)",
+        "associativity": "Associativity",
+        "data_stacked_die_count": "Stack Tiers",
+        "temperature_K": "Temperature (K)",
+        "process_node_nm": "Process Node (nm)"
+    }
     
-    # Filter for a representative fixed capacity (middle of the sweep)
-    caps = sorted(df[CAP_COL].unique())
-    target_cap = caps[len(caps)//2] 
-    sub = df[df[CAP_COL] == target_cap].copy()
-    
-    rows, cols = len(knobs), len(METRICS)
-    fig, axes = plt.subplots(rows, cols, figsize=(20, 5 * rows), constrained_layout=True)
-    fig.suptitle(f"Architectural Pareto Shift Matrix — {tech} (Capacity: {CAP_KB_LABELS.get(target_cap, target_cap)})", 
-                 fontsize=18, fontweight="bold")
-
-    for i, (knob, klabel) in enumerate(zip(knobs, labels)):
-        if knob not in sub.columns:
-            for j in range(cols): axes[i, j].set_visible(False)
-            continue
-            
-        unique_vals = sorted(sub[knob].unique())
-        norm = plt.Normalize(vmin=0, vmax=max(1, len(unique_vals)-1))
-        cmap = plt.cm.plasma
-        
-        for j, (ycol, ylabel, yscale) in enumerate(METRICS):
-            ax = axes[i, j]
-            ax.set_xscale("log")
-            ax.set_yscale(yscale)
-            ax.set_title(f"{klabel} Shift: {ylabel} vs Latency")
-            ax.set_xlabel("Latency (ns)")
-            ax.set_ylabel(ylabel)
-            ax.grid(True, which="both", alpha=0.3)
-            
-            for v_idx, val in enumerate(unique_vals):
-                val_sub = sub[sub[knob] == val].dropna(subset=[LAT_COL, ycol])
-                if len(val_sub) < 2: continue
-                
-                # Extract Pareto frontier for this specific knob value
-                x_pts, y_pts = val_sub[LAT_COL].values, val_sub[ycol].values
-                pf_mask = pareto_frontier_2d(x_pts, y_pts)
-                
-                color = cmap(norm(v_idx))
-                # Scatter points (background)
-                ax.scatter(x_pts, y_pts, color=color, alpha=0.15, s=6, linewidths=0)
-                
-                # Step Line (Frontier)
-                if pf_mask.sum() >= 2:
-                    lx, ly = pareto_step_line(x_pts[pf_mask], y_pts[pf_mask])
-                    ax.plot(lx, ly, color=color, linewidth=2, label=str(val), alpha=0.9, zorder=5)
-
-            if j == cols - 1: # Add legend to the rightmost plot of each row
-                ax.legend(title=klabel, bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8, ncol=1)
-def format_log_axis(ax, axis="x"):
-    """Helper for clean log axis labels."""
-    from matplotlib.ticker import LogLocator, FuncFormatter
-    if "x" in axis:
-        ax.xaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0,), numticks=10))
-    if "y" in axis:
-        ax.yaxis.set_major_locator(LogLocator(base=10.0, subs=(1.0,), numticks=10))
-
-def plot_architectural_sensitivities(tech, df, out_dir):
-    """Simple sensitivity plots for WW, Assoc, Stacking."""
-    knobs = ["word_width_bits", "associativity", "data_stacked_die_count"]
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle(f"Architectural Metric Sensitivity — {tech}", fontsize=16)
-    
-    for ax, knob in zip(axes, knobs):
-        if knob not in df.columns: continue
-        df.groupby(knob)[LAT_COL].mean().plot(kind='bar', ax=ax, color='teal', alpha=0.7)
-        ax.set_title(f"Impact of {knob}")
-        ax.set_ylabel("Avg Latency (ns)")
-        ax.grid(axis='y', alpha=0.3)
-        
-    path = os.path.join(out_dir, f"{tech}_sensitivities.png")
-    plt.savefig(path)
-    plt.close()
-    print(f"  Saved: {path}")
-
-def plot_capacity_scaling(tech, df, out_dir):
-    """Plot PPA scaling across capacity points."""
-    fig, ax = plt.subplots(figsize=(8, 6))
-    for metric, label, scale in METRICS:
-        scaled = df.groupby(CAP_COL)[metric].mean()
-        scaled.plot(ax=ax, label=label, marker='o')
-    
-    ax.set_xscale('log')
-    ax.set_yscale('log')
-    ax.set_xlabel("Capacity (KB)")
-    ax.set_ylabel("Normalized Metrics")
-    ax.set_title(f"Technology Scaling Trend — {tech}")
-    ax.legend()
-    ax.grid(True, which="both", alpha=0.3)
-    
-    path = os.path.join(out_dir, f"{tech}_scaling_trends.png")
-    plt.savefig(path)
-    plt.close()
-    print(f"  Saved: {path}")
-
-def main(tech: str):
-    full_csv = f"pareto/{tech}_arch/{tech}_arch_full_data.csv"
-    if not os.path.exists(full_csv):
-        print(f"ERROR: {full_csv} not found. Run pareto_analysis.py --arch first.")
+    if df.empty:
         return
 
-    print(f"Loading architectural sweep data: {full_csv}")
-    df = pd.read_csv(full_csv)
+    norm, _ = cap_colormap(df[CAP_COL])
+    cmap = plt.cm.viridis
     
-    out_dir = f"pareto/plots/{tech}_arch"
-    os.makedirs(out_dir, exist_ok=True)
+    for param_col, param_label in params.items():
+        if param_col not in df.columns or df[param_col].nunique() <= 1:
+            continue
+            
+        fig, axes = plt.subplots(1, 4, figsize=(22, 5.5), constrained_layout=True)
+        fig.suptitle(f"{tech} — Impact of {param_label} on Metrics\n(single-mat configs excluded from plot)", fontsize=16, fontweight="bold")
+        
+        for j, (ycol, ylabel, yscale) in enumerate(METRICS):
+            ax = axes[j]
+            
+            valid_df = df.dropna(subset=[param_col, ycol, CAP_COL])
+            if valid_df.empty:
+                ax.set_visible(False)
+                continue
+                
+            x = valid_df[param_col].values
+            y = valid_df[ycol].values
+            caps = valid_df[CAP_COL].values
+            
+            if "device_roadmap" in valid_df.columns:
+                roadmaps = sorted(valid_df["device_roadmap"].dropna().unique())
+                n_rm = len(roadmaps)
+                # Jitter x multiplicatively (±8%) so vertical columns of points don't perfectly overlap
+                multipliers = np.linspace(0.92, 1.08, n_rm) if n_rm > 1 else [1.0]
+                
+                for idx, rm in enumerate(roadmaps):
+                    rm_mask = (valid_df["device_roadmap"] == rm).values
+                    if not rm_mask.any(): continue
+                    
+                    x_jitter = x[rm_mask].astype(float) * multipliers[idx]
+                    
+                    ax.scatter(x_jitter, y[rm_mask],
+                               c=caps[rm_mask], norm=norm, cmap=cmap,
+                               marker=SUB_MARKERS.get(rm, "o"),
+                               s=40, alpha=0.5, edgecolors="none", zorder=3)
+            else:
+                ax.scatter(x, y,
+                           c=caps, norm=norm, cmap=cmap,
+                           s=40, alpha=0.5, edgecolors="none", zorder=3)
+            
+            ax.set_xscale("log")
+            ax.set_yscale("log")  # Enforce log-log scale
+            ax.set_xlabel(f"{param_label} (log scale)", fontsize=11)
+            ax.set_ylabel(f"{ylabel} (log scale)", fontsize=11)
+            ax.set_title(f"{ylabel} vs {param_label}", fontsize=13)
+            
+            format_log_axis(ax, axis="both")
+            ax.grid(True, which="both", alpha=0.3)
+            
+        add_cap_colorbar(fig, list(axes), norm)
+        
+        if "device_roadmap" in df.columns:
+            roadmaps = df["device_roadmap"].dropna().unique()
+            if len(roadmaps) > 0:
+                handles = [Line2D([0], [0], marker=SUB_MARKERS.get(rm, "o"), color="w",
+                                  markerfacecolor="gray", markersize=8, label=rm)
+                           for rm in sorted(roadmaps)]
+                axes[0].legend(handles=handles, title="Roadmap", fontsize=9, loc="best")
+                
+        out_path = os.path.join(out_dir, f"arch_impact_{param_col}.png")
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {out_path}")
+
+
+def main(pareto_csv: str):
+    if not os.path.exists(pareto_csv):
+        print(f"ERROR: {pareto_csv} not found. Run pareto_analysis.py --arch first.")
+        return
+
+    print(f"Loading architectural Pareto dataset: {pareto_csv}")
+    df_pareto = pd.read_csv(pareto_csv)
     
-    print(f"INFO: Generating dashboards for {tech}_arch")
-    plot_architectural_sensitivities(tech, df, out_dir)
-    plot_capacity_scaling(tech, df, out_dir)
-    plot_pareto_shift_matrix(tech, df, out_dir)
-    
-    print("\nVisualization Done.")
+    # Filter out single-mat configs for plotting
+    df_pareto = df_pareto[df_pareto["data_total_mats"] > 1].copy()
+
+    out_root = "pareto/plots_arch"
+    os.makedirs(out_root, exist_ok=True)
+
+    # Per-technology plots
+    for tech in df_pareto[TECH_COL].unique():
+        tech_dir = os.path.join(out_root, tech)
+        os.makedirs(tech_dir, exist_ok=True)
+        print(f"\n[{tech}] Generating per-technology plots...")
+
+        # 3-panel Pareto tradeoffs
+        plot_tech_3panel(tech, df_pareto, tech_dir)
+
+        # Dominated vs Pareto overlay (needs arch full_data.csv)
+        full_csv = f"pareto/{tech}_arch/{tech}_arch_full_data.csv"
+        df_full_for_param = None
+        if os.path.exists(full_csv):
+            print(f"  Loading full data: {full_csv}")
+            df_full = pd.read_csv(full_csv)
+            df_full = df_full[df_full["data_total_mats"] > 1].copy()
+            plot_dominated_vs_pareto(tech, df_full, df_pareto, tech_dir)
+            df_full_for_param = df_full
+        else:
+            print(f"  Skipping dominated overlay ({full_csv} not found). "
+                  "Run: python pareto_analysis.py --arch")
+            df_full_for_param = df_pareto
+
+        plot_arch_parameter_impact(tech, df_full_for_param, tech_dir)
+
+    # Global comparison plots
+    print("\n[Global] Generating cross-technology comparison plots...")
+    for col, label, scale in METRICS:
+        if col == LAT_COL:
+            continue
+        safe = label.replace(" ", "_").replace("²", "2").replace("(", "").replace(")", "").replace("/", "_")
+        plot_global_comparison(
+            df_pareto, col, label, scale,
+            os.path.join(out_root, f"global_{safe}.png")
+        )
+
+    plot_scaling_comparison(df_pareto, os.path.join(out_root, "global_scaling_comparison.png"))
+
+    # Summary stats
+    save_summary_stats(df_pareto, os.path.join(out_root, "summary_stats.csv"))
+
+    print("\nAll architectural plots generated.")
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser()
-    p.add_argument("--tech", default="SRAM")
+    p = argparse.ArgumentParser(description="Generate architectural Pareto frontier plots.")
+    p.add_argument("--pareto", default="pareto/pareto.csv",
+                   help="Path to combined Pareto CSV (which should contain arch data).")
     args = p.parse_args()
-    main(args.tech)
+    main(args.pareto)
