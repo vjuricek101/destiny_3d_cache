@@ -336,47 +336,49 @@ def prepare_data(args):
     return X_train, X_val, X_test, y_train, y_val, y_test, scaler, feature_names
 
 
-def plot_validation(y_true: np.ndarray, y_pred: np.ndarray, save_path: str, title: str = "PPA Validation Scatter"):
-    """Generates a 2x2 residual scatter plot (% error vs. true value) for the 4 PPA metrics."""
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+def plot_training_history(log_rows, save_path, title="PPA Training Loss History"):
+    """Generates a 2x5 plot showing train and validation loss for each objective and the total."""
+    if not log_rows: return
+    df = pd.DataFrame(log_rows)
+    fig, axes = plt.subplots(2, 5, figsize=(22, 10))
     fig.suptitle(title, fontsize=16, fontweight="bold")
-
-    for ax, i in zip(axes.flat, range(len(TARGET_LABELS))):
-        error_pct = (y_pred[:, i] - y_true[:, i]) / (y_true[:, i] + 1e-12) * 100
-        median_err = np.median(error_pct)
-
-        ax.axhline(0,          color="red",    linestyle="--", lw=1.5, label="Ideal (0% error)")
-        ax.axhline(median_err, color="orange", linestyle="--", lw=1.5, label=f"Median ({median_err:+.1f}%)")
-        ax.axhspan(-10, 10,    color="green",  alpha=0.08,             label="±10% band")
-
-        ax.scatter(y_true[:, i], error_pct, alpha=0.5, edgecolors="w", s=30)
-
-        r2   = r2_score(y_true[:, i], y_pred[:, i])
-        mape = mean_absolute_percentage_error(y_true[:, i], y_pred[:, i]) * 100
-        ax.text(0.03, 0.97, f"R²={r2:.3f}  MAPE={mape:.1f}%",
-                transform=ax.transAxes, va="top", fontsize=9,
-                bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.7))
-
-        ax.set_title(TARGET_LABELS[i])
-        ax.set_xlabel(f"True {TARGET_LABELS[i]}")
-        ax.set_ylabel("Error (%)")
-        ax.set_xscale("log")
-        ax.grid(True, which="both", ls="--", alpha=0.3)
-        ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    
+    labels = TARGET_LABELS + ["Total Weighted"]
+    
+    for i in range(5):
+        # Train Row
+        ax_t = axes[0, i]
+        col_t = f"train_loss_{i}" if i < 4 else "train_loss"
+        ax_t.plot(df["epoch"], df[col_t], color="#1f77b4", lw=2)
+        ax_t.set_title(f"Train: {labels[i]}", fontsize=12)
+        ax_t.set_yscale("log")
+        ax_t.grid(True, which="both", ls="--", alpha=0.4)
+        
+        # Val Row
+        ax_v = axes[1, i]
+        col_v = f"val_loss_{i}" if i < 4 else "val_loss"
+        ax_v.plot(df["epoch"], df[col_v], color="#d62728", lw=2)
+        ax_v.set_title(f"Val: {labels[i]}", fontsize=12)
+        ax_v.set_yscale("log")
+        ax_v.grid(True, which="both", ls="--", alpha=0.4)
+        
+    for ax in axes.flat:
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Huber Loss")
+        
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+    plt.savefig(save_path, dpi=150)
     plt.close()
 
 
-def save_and_evaluate(model, X_test, y_test, device, args, scaler, feature_names, log_rows):
-    """Evaluates testing holdouts, computes unscaled metrics, and saves model artifacts."""
+def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feature_names, log_rows, set_name="train"):
+    """Evaluates holdouts (defaults to training set), computes unscaled metrics, and saves model artifacts."""
     model.eval()
     with torch.no_grad():
-        y_pred_log = model(torch.from_numpy(X_test).to(device)).cpu().numpy()
+        y_pred_log = model(torch.from_numpy(X_eval).to(device)).cpu().numpy()
     
     y_pred = unscale_targets(y_pred_log)
-    y_true = unscale_targets(y_test)
+    y_true = unscale_targets(y_eval)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -388,6 +390,7 @@ def save_and_evaluate(model, X_test, y_test, device, args, scaler, feature_names
                 "MedRelErr_percent": round(np.median(np.abs(y_pred[:, i] - y_true[:, i]) / (y_true[:, i] + 1e-12)) * 100, 2),
                 "MAE":               round(mean_absolute_error(y_true[:, i], y_pred[:, i]), 8),
                 "MSE":               round(mean_squared_error(y_true[:, i], y_pred[:, i]), 8),
+                "Log10_MSE":         round(mean_squared_error(y_eval[:, i], y_pred_log[:, i]), 8),
                 "True_Min": y_true[:, i].min(), "True_Max": y_true[:, i].max(),
                 "Pred_Min": y_pred[:, i].min(), "Pred_Max": y_pred[:, i].max(),
             }
@@ -395,9 +398,9 @@ def save_and_evaluate(model, X_test, y_test, device, args, scaler, feature_names
         ]
 
     # Save artifacts & Plots
-    plot_validation(y_true, y_pred, os.path.join(args.output_dir, "validation_scatter.png"), title=f"Testing Holdout Correlation ({args.tech})")
+    plot_training_history(log_rows, os.path.join(args.output_dir, "loss_history.png"), title=f"Training History ({args.tech})")
     
-    metrics_path = os.path.join(args.output_dir, "test_metrics.csv")
+    metrics_path = os.path.join(args.output_dir, f"{set_name}_metrics.csv")
     pd.DataFrame(metrics_rows).to_csv(metrics_path, index=False)
     
     if log_rows:
@@ -414,7 +417,8 @@ def save_and_evaluate(model, X_test, y_test, device, args, scaler, feature_names
     final_metrics = {}
     for m in metrics_rows:
         final_metrics |= {f"{m['Metric']}_R2": m["R2"], f"{m['Metric']}_MAPE": m["MAPE_percent"],
-                          f"{m['Metric']}_MSE": m["MSE"], f"{m['Metric']}_MAE": m["MAE"]}
+                          f"{m['Metric']}_MSE": m["MSE"], f"{m['Metric']}_MAE": m["MAE"],
+                          f"{m['Metric']}_Log10_MSE": m["Log10_MSE"]}
 
     y_true_dict = {label: y_true[:, i] for i, label in enumerate(TARGET_LABELS)}
     y_pred_dict = {label: y_pred[:, i] for i, label in enumerate(TARGET_LABELS)}
@@ -460,20 +464,34 @@ def train(args, trial=None):
 
     for epoch in range(1, args.epochs + 1):
         model.train()
-        total_train_loss = 0
+        total_train_loss, total_train_indiv = 0, torch.zeros(4, device=device)
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            loss = criterion(model(xb), yb)
-            loss.backward()
+            pred = model(xb)
+            loss_tensor = base_criterion(pred, yb)
+            indiv_loss = loss_tensor.mean(dim=0)
+            weighted_loss = (indiv_loss * loss_weights).mean()
+            weighted_loss.backward()
             optimizer.step()
-            total_train_loss += loss.item() * len(xb)
+            total_train_loss += weighted_loss.item() * len(xb)
+            total_train_indiv += indiv_loss.detach() * len(xb)
         train_loss = total_train_loss / len(X_train)
+        train_indiv = (total_train_indiv / len(X_train)).cpu().numpy()
 
         model.eval()
+        total_val_loss, total_val_indiv = 0, torch.zeros(4, device=device)
         with torch.no_grad():
-            val_loss = sum(criterion(model(xb.to(device)), yb.to(device)).item() * len(xb)
-                           for xb, yb in val_loader) / len(X_val)
+            for xb, yb in val_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                pred = model(xb)
+                loss_tensor = base_criterion(pred, yb)
+                indiv_loss = loss_tensor.mean(dim=0)
+                weighted_loss = (indiv_loss * loss_weights).mean()
+                total_val_loss += weighted_loss.item() * len(xb)
+                total_val_indiv += indiv_loss * len(xb)
+        val_loss = total_val_loss / len(X_val)
+        val_indiv = (total_val_indiv / len(X_val)).cpu().numpy()
 
         if trial is not None:
             trial.report(val_loss, epoch)
@@ -482,7 +500,12 @@ def train(args, trial=None):
 
         current_lr = scheduler.get_last_lr()[0]
         scheduler.step()
-        log_rows.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": current_lr})
+        
+        log_row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": current_lr}
+        for i in range(4):
+            log_row[f"train_loss_{i}"] = train_indiv[i]
+            log_row[f"val_loss_{i}"] = val_indiv[i]
+        log_rows.append(log_row)
 
         if epoch % args.log_interval == 0 or epoch == 1:
             print(f"{epoch:>6}  {train_loss:>12.6f}  {val_loss:>12.6f}  {current_lr:>10.2e}")
@@ -500,7 +523,10 @@ def train(args, trial=None):
         model.load_state_dict(best_state)
         print(f"Best weights restored (val loss: {best_val_loss:.6f})")
 
-    return save_and_evaluate(model, X_test, y_test, device, args, scaler, feats, log_rows)
+    if args.eval_on_test:
+        return save_and_evaluate(model, X_test, y_test, device, args, scaler, feats, log_rows, set_name="test")
+    else:
+        return save_and_evaluate(model, X_val, y_val, device, args, scaler, feats, log_rows, set_name="val")
 
 
 # Inference helper
@@ -530,7 +556,7 @@ def parse_args(args=None):
     p.add_argument("--lr",           type=float, default=1e-3)
     p.add_argument("--hidden-dim",   type=int,   default=512)
     p.add_argument("--n-blocks",     type=int,   default=6)
-    p.add_argument("--dropout",      type=float, default=0.1)
+    p.add_argument("--dropout",      type=float, default=0.3)
     p.add_argument("--patience",     type=int,   default=50)
     p.add_argument("--sample-size",  type=int,   default=0, help="Debug with smaller N.")
     p.add_argument("--log-interval", type=int,   default=20)
@@ -538,6 +564,7 @@ def parse_args(args=None):
                    help="Loss weights: [Lat, Area, Energy, Leak].")
     p.add_argument("--from-study", default=None, help="Load optimized HP from Optuna study.")
     p.add_argument("--arch", action="store_true", help="Use architectural sweep data.")
+    p.add_argument("--eval-on-test", action="store_true", help="Perform final evaluation on test set instead of validation set.")
     return p.parse_args(args)
 
 

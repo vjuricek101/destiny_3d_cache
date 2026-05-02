@@ -108,7 +108,7 @@ endif
 
 tune:
 	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) (study: $(STUDY_NAME)) ---"
-	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --trials 50 --study-name $(STUDY_NAME)
+	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --trials 20 --study-name $(STUDY_NAME)
 
 train:
 	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (from study: $(STUDY_NAME)) ---"
@@ -122,12 +122,13 @@ design:
 # --- Cleaning ---
 
 clean_studies:
-	@echo "--- Deleting all Optuna tuning studies from optuna_study.db ---"
+	@echo "--- Deleting all Optuna tuning studies and clearing tuning artifacts ---"
 	@python3 -c "import optuna; \
 storage = 'sqlite:///optuna_study.db'; \
 summaries = optuna.get_all_study_summaries(storage=storage); \
 [optuna.delete_study(study_name=s.study_name, storage=storage) for s in summaries]; \
 print(f'Done. {len(summaries)} study/studies removed.')"
+	rm -rf model_output/tuning/
 
 clean:
 ifeq ($(TYPE), ALL)

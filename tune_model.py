@@ -14,10 +14,10 @@ def objective(trial, config):
     
     # Suggest architecture
     args.tech       = config["tech"]
-    args.hidden_dim = trial.suggest_categorical("hidden_dim", [256, 512, 1024])
+    args.hidden_dim = trial.suggest_categorical("hidden_dim", [256])
     args.n_blocks   = trial.suggest_int("n_blocks", 4, 16)
     args.lr         = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-    args.dropout    = trial.suggest_float("dropout", 0.05, 0.2)
+    args.dropout    = trial.suggest_float("dropout", 0.2, 0.5)
     
     # Suggest loss weights for [Latency, Area, Energy, Leakage]
     args.alpha      = [trial.suggest_float("alpha_lat", 1.0, 10.0),
@@ -30,19 +30,16 @@ def objective(trial, config):
     args.epochs      = config.get("epochs", 300)
     args.patience    = config.get("patience", 40)
     args.output_dir  = os.path.join("model_output", "tuning", f"{config['study_name']}_trial_{trial.number}")
+    args.eval_on_test = False
 
     # Execution
-    _, _, _, metrics, y_true, y_pred = train_model.train(args, trial=trial)  
-
-    # Log10-MSE Calculation
-    def log10_mse(true, pred):
-        return np.mean((np.log10(np.clip(true, 1e-12, None)) - np.log10(np.clip(pred, 1e-12, None)))**2)
+    _, _, _, metrics, _, _ = train_model.train(args, trial=trial)  
 
     total_error = sum([
-        log10_mse(y_true["Read Latency (ns)"], y_pred["Read Latency (ns)"]),
-        log10_mse(y_true["Area (mm^2)"],       y_pred["Area (mm^2)"]),
-        log10_mse(y_true["Write Energy (nJ)"], y_pred["Write Energy (nJ)"]),
-        log10_mse(y_true["Leakage (mW)"],      y_pred["Leakage (mW)"])
+        metrics["Read Latency (ns)_Log10_MSE"],
+        metrics["Area (mm^2)_Log10_MSE"],
+        metrics["Write Energy (nJ)_Log10_MSE"],
+        metrics["Leakage (mW)_Log10_MSE"]
     ])
 
     return total_error
