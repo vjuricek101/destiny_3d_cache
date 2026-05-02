@@ -123,19 +123,11 @@ design:
 
 clean_studies:
 	@echo "--- Deleting all Optuna tuning studies from optuna_study.db ---"
-	@python3 -c "
-import optuna, sys
-optuna.logging.set_verbosity(optuna.logging.WARNING)
-storage = 'sqlite:///optuna_study.db'
-summaries = optuna.get_all_study_summaries(storage=storage)
-if not summaries:
-    print('No studies found — DB is already clean.')
-    sys.exit(0)
-for s in summaries:
-    optuna.delete_study(study_name=s.study_name, storage=storage)
-    print(f'Deleted: {s.study_name}')
-print(f'Done. {len(summaries)} study/studies removed.')
-"
+	@python3 -c "import optuna; \
+storage = 'sqlite:///optuna_study.db'; \
+summaries = optuna.get_all_study_summaries(storage=storage); \
+[optuna.delete_study(study_name=s.study_name, storage=storage) for s in summaries]; \
+print(f'Done. {len(summaries)} study/studies removed.')"
 
 clean:
 ifeq ($(TYPE), ALL)

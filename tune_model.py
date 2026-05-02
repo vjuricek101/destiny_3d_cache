@@ -28,7 +28,7 @@ def objective(trial, config):
     args.data        = config["data"]
     args.sample_size = config["sample_size"]
     args.epochs      = config.get("epochs", 300)
-    args.patience    = config.get("patience", 20)
+    args.patience    = config.get("patience", 40)
     args.output_dir  = os.path.join("model_output", "tuning", f"{config['study_name']}_trial_{trial.number}")
 
     # Execution

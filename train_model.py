@@ -263,12 +263,13 @@ def predict(model: nn.Module, scaler: StandardScaler, feat_cols: list, df_input:
 # Training
 
 def filter_physical_failures(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop DESTINY simulation failures based on physical sanity checks."""
     initial_len = len(df)
     df = df[
-        (df["cache_hit_latency_ns"] < 100) & 
-        (df["cache_area_mm2"] < 1000) & 
-        (df["cache_hit_energy_nJ"] < 1000)
+        (df["cache_hit_latency_ns"] < 100) &
+        (df["cache_area_mm2"] < 1000) &
+        (df["cache_hit_energy_nJ"] < 1000) &
+        (df["cache_leakage_mW"] > 0) &
+        (df["cache_leakage_mW"] < 1e5)
     ]
     if len(df) < initial_len:
         print(f"FILTER: Dropped {initial_len - len(df)} non-physical simulation failures.")

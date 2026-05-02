@@ -132,21 +132,24 @@ def max_retention_from_cell(c_cell: float, access_width_f: float,
 # Physics Constraint Validation
 
 def valid_sram(p: Dict[str, Any]) -> bool:
-    """Validates SRAM transistor sizing and sense-voltage compatibility."""
+    """Validates SRAM transistor sizing"""
     try:
-        wn    = float(p["SRAMCellNMOSWidth (F)"])
-        wp    = float(p["SRAMCellPMOSWidth (F)"])
-        wac   = float(p["AccessCMOSWidth (F)"])
-        vsense = float(p["MinSenseVoltage (mV)"])
+        wn  = float(p["SRAMCellNMOSWidth (F)"])
+        wp  = float(p["SRAMCellPMOSWidth (F)"])
+        wac = float(p["AccessCMOSWidth (F)"])
 
-        # Stability: NMOS must be stronger than the access transistor.
-        if wn / wac < 1.2:        return False
-        # Writeability: PMOS mustn't overpower access.
-        if wp / wac > 1.0:        return False
-        # Consistency: stronger access enables lower sense-voltage thresholds.
-        if vsense > 120 / wac:    return False
+        # Beta ratio (cell ratio) = W_PD / W_PG >= 2
+        # Ensures read does not flip the stored value.
+        if wn / wac < 2.0:
+            return False
+
+        # Gamma ratio (pull-up ratio) = W_PU / W_PG < 1
+        # Ensures access transistor can overpower pull-up during write.
+        if wp / wac >= 1.0:
+            return False
 
         return True
+
     except (KeyError, ZeroDivisionError, ValueError):
         return False
 
