@@ -14,13 +14,12 @@ def objective(trial, config):
     
     # Suggest architecture
     args.tech       = config["tech"]
-    args.hidden_dim = trial.suggest_categorical("hidden_dim", [256])
     args.n_blocks   = trial.suggest_int("n_blocks", 4, 16)
     args.lr         = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
     args.dropout    = trial.suggest_float("dropout", 0.2, 0.5)
     
     # Suggest loss weights for [Latency, Area, Energy, Leakage]
-    args.alpha      = [trial.suggest_float("alpha_lat", 1.0, 10.0),
+    args.alpha      = [1.0,
                        trial.suggest_float("alpha_area", 1.0, 10.0),
                        trial.suggest_float("alpha_energy", 1.0, 10.0),
                        trial.suggest_float("alpha_leak", 1.0, 10.0)]
@@ -79,7 +78,7 @@ def main():
         storage="sqlite:///optuna_study.db",
         load_if_exists=True, 
         direction="minimize",
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=10)
+        pruner=optuna.pruners.MedianPruner(n_warmup_steps=50)
     )
     
     print(f"TUNING: Study '{args.study_name}' (Arch Mode: {args.arch})")

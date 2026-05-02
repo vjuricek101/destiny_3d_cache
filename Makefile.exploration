@@ -112,7 +112,7 @@ tune:
 
 train:
 	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (from study: $(STUDY_NAME)) ---"
-	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --from-study $(STUDY_NAME)
+	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --from-study $(STUDY_NAME) --eval-on-test
 
 
 design:

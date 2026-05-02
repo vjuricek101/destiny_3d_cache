@@ -336,42 +336,53 @@ def prepare_data(args):
     return X_train, X_val, X_test, y_train, y_val, y_test, scaler, feature_names
 
 
-def plot_training_history(log_rows, save_path, title="PPA Training Loss History"):
-    """Generates a 2x5 plot showing train and validation loss for each objective and the total."""
+def plot_training_history(log_rows, save_path, title="PPA Training Loss History", is_tuning=False):
     if not log_rows: return
     df = pd.DataFrame(log_rows)
-    fig, axes = plt.subplots(2, 5, figsize=(22, 10))
+
+    n_rows = 2 if is_tuning else 1
+    fig, axes = plt.subplots(n_rows, 5,
+                             figsize=(24, 5 * n_rows),
+                             sharey="row",          # shared y-scale within each row
+                             squeeze=False)         # always 2-D array
     fig.suptitle(title, fontsize=16, fontweight="bold")
-    
-    labels = TARGET_LABELS + ["Total Weighted"]
-    
-    for i in range(5):
-        # Train Row
-        ax_t = axes[0, i]
-        col_t = f"train_loss_{i}" if i < 4 else "train_loss"
-        ax_t.plot(df["epoch"], df[col_t], color="#1f77b4", lw=2)
-        ax_t.set_title(f"Train: {labels[i]}", fontsize=12)
-        ax_t.set_yscale("log")
-        ax_t.grid(True, which="both", ls="--", alpha=0.4)
-        
-        # Val Row
-        ax_v = axes[1, i]
-        col_v = f"val_loss_{i}" if i < 4 else "val_loss"
-        ax_v.plot(df["epoch"], df[col_v], color="#d62728", lw=2)
-        ax_v.set_title(f"Val: {labels[i]}", fontsize=12)
-        ax_v.set_yscale("log")
-        ax_v.grid(True, which="both", ls="--", alpha=0.4)
-        
-    for ax in axes.flat:
+
+    col_labels  = TARGET_LABELS + ["Total Weighted"]
+    train_keys  = [f"train_{l}" for l in TARGET_LABELS] + ["train_loss"]
+    val_huber_k = [f"val_{l}"   for l in TARGET_LABELS] + ["val_loss"]
+    val_mse_k   = [f"val_log_mse_{l}" for l in TARGET_LABELS] + ["val_log_mse_total"]
+
+    # Row 0 — Train Huber vs Val Huber (shared scale within row)
+    for col, (label, tk, vk) in enumerate(zip(col_labels, train_keys, val_huber_k)):
+        ax = axes[0, col]
+        ax.plot(df["epoch"], df[tk], color="#1f77b4", lw=1.5, label="Train Huber")
+        ax.plot(df["epoch"], df[vk], color="#d62728", lw=1.5, label="Val Huber", alpha=0.8)
+        ax.set_title(label, fontsize=12)
+        ax.set_yscale("log")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Huber Loss")
-        
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        ax.legend(fontsize=9)
+        ax.grid(True, which="both", ls="--", alpha=0.4)
+
+    # Row 1 (tuning only) — Val Log10 MSE (shared scale within row)
+    if is_tuning:
+        for col, (label, mk) in enumerate(zip(col_labels, val_mse_k)):
+            ax = axes[1, col]
+            ax.plot(df["epoch"], df[mk], color="#2ca02c", lw=1.5, label="Val Log10 MSE")
+            ax.set_title(label, fontsize=12)
+            ax.set_yscale("log")
+            ax.set_xlabel("Epoch")
+            ax.legend(fontsize=9)
+            ax.grid(True, which="both", ls="--", alpha=0.4)
+        axes[0, 0].set_ylabel("Huber Loss", fontsize=11, labelpad=8)
+        axes[1, 0].set_ylabel("Log10 MSE", fontsize=11, labelpad=8)
+
+    plt.tight_layout(rect=[0, 0, 1, 0.94])
     plt.savefig(save_path, dpi=150)
     plt.close()
 
 
-def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feature_names, log_rows, set_name="train"):
+def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feature_names, log_rows, set_name="train", is_tuning=False):
     """Evaluates holdouts (defaults to training set), computes unscaled metrics, and saves model artifacts."""
     model.eval()
     with torch.no_grad():
@@ -398,7 +409,12 @@ def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feature_names
         ]
 
     # Save artifacts & Plots
-    plot_training_history(log_rows, os.path.join(args.output_dir, "loss_history.png"), title=f"Training History ({args.tech})")
+    plot_training_history(
+        log_rows,
+        os.path.join(args.output_dir, "loss_history.png"),
+        title=f"Training History ({args.tech})",
+        is_tuning=is_tuning,
+    )
     
     metrics_path = os.path.join(args.output_dir, f"{set_name}_metrics.csv")
     pd.DataFrame(metrics_rows).to_csv(metrics_path, index=False)
@@ -457,10 +473,10 @@ def train(args, trial=None):
 
     print(f"Device: {device} | Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
     print(f"\nTraining up to {args.epochs} epochs (patience={args.patience}) ...")
-    print(f"{'Epoch':>6}  {'Train Loss':>12}  {'Val Loss':>12}  {'LR':>10}")
-    print("-" * 46)
+    print(f"{'Epoch':>6}  {'Train(Huber)':>14}  {'Val Log10MSE':>14}  {'LR':>10}")
+    print("-" * 50)
 
-    best_val_loss, patience_count, best_state, log_rows = float("inf"), 0, None, []
+    best_val_log_mse, patience_count, best_state, log_rows = float("inf"), 0, None, []
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -480,53 +496,69 @@ def train(args, trial=None):
         train_indiv = (total_train_indiv / len(X_train)).cpu().numpy()
 
         model.eval()
-        total_val_loss, total_val_indiv = 0, torch.zeros(4, device=device)
+        total_val_huber, total_val_huber_indiv = 0.0, torch.zeros(4, device=device)
+        total_val_sq_err = torch.zeros(4, device=device)  # for Log10 MSE
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 pred = model(xb)
+                # Huber (diagnostic / logged only)
                 loss_tensor = base_criterion(pred, yb)
-                indiv_loss = loss_tensor.mean(dim=0)
+                indiv_loss  = loss_tensor.mean(dim=0)
                 weighted_loss = (indiv_loss * loss_weights).mean()
-                total_val_loss += weighted_loss.item() * len(xb)
-                total_val_indiv += indiv_loss * len(xb)
-        val_loss = total_val_loss / len(X_val)
-        val_indiv = (total_val_indiv / len(X_val)).cpu().numpy()
+                total_val_huber       += weighted_loss.item() * len(xb)
+                total_val_huber_indiv += indiv_loss * len(xb)
+                # Log10 MSE — predictions & targets are already in log10 space
+                total_val_sq_err += ((pred - yb) ** 2).sum(dim=0)
 
+        val_loss  = total_val_huber / len(X_val)                              # Huber (logged)
+        val_indiv = (total_val_huber_indiv / len(X_val)).cpu().numpy()        # per-obj Huber
+        val_log_mse       = (total_val_sq_err / len(X_val)).cpu().numpy()     # per-obj Log10 MSE
+        val_log_mse_total = float(val_log_mse.sum())                          # scalar for control
+
+        # Pruner signal: Log10 MSE (matches post-trial objective)
         if trial is not None:
-            trial.report(val_loss, epoch)
+            trial.report(val_log_mse_total, epoch)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
         current_lr = scheduler.get_last_lr()[0]
         scheduler.step()
-        
-        log_row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss, "lr": current_lr}
-        for i in range(4):
-            log_row[f"train_loss_{i}"] = train_indiv[i]
-            log_row[f"val_loss_{i}"] = val_indiv[i]
+
+        log_row = {
+            "epoch":      epoch,
+            "train_loss": train_loss,
+            "val_loss":   val_loss,           # Huber (kept for plot compatibility)
+            "val_log_mse_total": val_log_mse_total,
+            "lr":         current_lr,
+        }
+        for i, label in enumerate(TARGET_LABELS):
+            log_row[f"train_{label}"]       = train_indiv[i]
+            log_row[f"val_{label}"]         = val_indiv[i]      # Huber per-obj
+            log_row[f"val_log_mse_{label}"] = val_log_mse[i]   # Log10 MSE per-obj
         log_rows.append(log_row)
 
         if epoch % args.log_interval == 0 or epoch == 1:
-            print(f"{epoch:>6}  {train_loss:>12.6f}  {val_loss:>12.6f}  {current_lr:>10.2e}")
+            print(f"{epoch:>6}  {train_loss:>14.6f}  {val_log_mse_total:>14.6f}  {current_lr:>10.2e}")
 
-        if val_loss < best_val_loss - 1e-7:
-            best_val_loss, patience_count = val_loss, 0
+        # Early stopping: Log10 MSE (consistent with pruner & trial objective)
+        if val_log_mse_total < best_val_log_mse - 1e-9:
+            best_val_log_mse, patience_count = val_log_mse_total, 0
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
         else:
             patience_count += 1
             if patience_count >= args.patience:
-                print(f"\nEarly stopping at epoch {epoch} (best val loss: {best_val_loss:.6f})")
+                print(f"\nEarly stopping at epoch {epoch} (best val Log10 MSE: {best_val_log_mse:.6f})")
                 break
 
     if best_state:
         model.load_state_dict(best_state)
-        print(f"Best weights restored (val loss: {best_val_loss:.6f})")
+        print(f"Best weights restored (val Log10 MSE: {best_val_log_mse:.6f})")
 
     if args.eval_on_test:
-        return save_and_evaluate(model, X_test, y_test, device, args, scaler, feats, log_rows, set_name="test")
+        return save_and_evaluate(model, X_test, y_test, device, args, scaler, feats, log_rows, set_name="test", is_tuning=False)
     else:
-        return save_and_evaluate(model, X_val, y_val, device, args, scaler, feats, log_rows, set_name="val")
+        return save_and_evaluate(model, X_val, y_val, device, args, scaler, feats, log_rows, set_name="val", is_tuning=(trial is not None))
 
 
 # Inference helper
@@ -554,7 +586,7 @@ def parse_args(args=None):
     p.add_argument("--epochs",       type=int,   default=300)
     p.add_argument("--batch-size",   type=int,   default=1024)
     p.add_argument("--lr",           type=float, default=1e-3)
-    p.add_argument("--hidden-dim",   type=int,   default=512)
+    p.add_argument("--hidden-dim",   type=int,   default=256)
     p.add_argument("--n-blocks",     type=int,   default=6)
     p.add_argument("--dropout",      type=float, default=0.3)
     p.add_argument("--patience",     type=int,   default=50)
@@ -575,10 +607,15 @@ def load_params_from_study(args):
         import optuna
         best = optuna.load_study(study_name=args.from_study, storage=db).best_params
         print(f"\n[INFO] Loading optimized parameters from: {args.from_study}")
-        for k in ["hidden_dim", "n_blocks", "lr", "dropout"]:
+        for k in ["n_blocks", "lr", "dropout"]:
             if k in best: setattr(args, k, best[k])
-        if "alpha_lat" in best:
-            args.alpha = [best.get(f"alpha_{m}", 1.0) for m in ["lat", "area", "energy", "leak"]]
+        if "alpha_area" in best:  # check for any tuned alpha, not the anchored one
+            args.alpha = [
+                1.0,  # latency anchor
+                best.get("alpha_area",   1.0),
+                best.get("alpha_energy", 1.0),
+                best.get("alpha_leak",   1.0),
+            ]
     except Exception as e:
         print(f"WARNING: Study '{args.from_study}' load failed: {e}")
 
