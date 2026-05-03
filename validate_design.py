@@ -6,7 +6,7 @@ import argparse
 import pandas as pd
 import numpy as np
 
-def validate(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, node=32, roadmap="HP"):
+def validate(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, node=32, roadmap="HP", timeout=60):
     """
     Validates an inverse design result by running it through the actual DESTINY engine.
     """
@@ -45,7 +45,12 @@ def validate(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, node=32, roadmap
     # 3. Run DESTINY
     print("Running DESTINY...")
     try:
-        res = subprocess.run(["./destiny", cfg_file], capture_output=True, text=True)
+        try:
+            res = subprocess.run(["./destiny", cfg_file], capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"DESTINY Error: Timed out after {timeout} seconds")
+            return
+
         if res.returncode != 0:
             print(f"DESTINY Error: {res.stderr}")
             return
@@ -87,7 +92,8 @@ if __name__ == "__main__":
     parser.add_argument("--wac",     type=float, required=True)
     parser.add_argument("--node",    type=int,   default=32)
     parser.add_argument("--roadmap", default="HP")
+    parser.add_argument("--timeout", type=int, default=60)
     args = parser.parse_args()
 
     validate(args.tech, args.cap, args.ww, args.assoc, args.stack, args.temp, 
-             args.wn, args.wp, args.wac, node=args.node, roadmap=args.roadmap)
+             args.wn, args.wp, args.wac, node=args.node, roadmap=args.roadmap, timeout=args.timeout)

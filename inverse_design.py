@@ -16,7 +16,7 @@ class UnifiedOptimizer:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # Determine paths
-        suffix = "_arch" if is_arch else "_full"
+        suffix = "_arch_full" if is_arch else "_full"
         self.model_dir = f"model_output/{tech.lower()}{suffix}"
         
         # Load assets
@@ -25,8 +25,13 @@ class UnifiedOptimizer:
         with open(os.path.join(self.model_dir, "scaler.pkl"), "rb") as f:
             self.scaler = pickle.load(f)
             
-        self.model = PPA_MLP(len(self.feature_cols)).to(self.device)
-        self.model.load_state_dict(torch.load(os.path.join(self.model_dir, "model.pt"), map_location=self.device))
+        # Infer architecture from state dict
+        sd = torch.load(os.path.join(self.model_dir, "model.pt"), map_location=self.device)
+        hidden_dim = sd["input_proj.weight"].shape[0]
+        n_blocks = max([int(k.split(".")[1]) for k in sd.keys() if k.startswith("blocks.")]) + 1
+        
+        self.model = PPA_MLP(len(self.feature_cols), hidden_dim=hidden_dim, n_blocks=n_blocks).to(self.device)
+        self.model.load_state_dict(sd)
         self.model.eval()
 
         self.means = torch.tensor(self.scaler.mean_, dtype=torch.float32, device=self.device)

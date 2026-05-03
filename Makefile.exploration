@@ -108,7 +108,7 @@ endif
 
 tune:
 	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) (study: $(STUDY_NAME)) ---"
-	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --trials 20 --study-name $(STUDY_NAME)
+	python3 $(TUNE_SCRIPT)
 
 train:
 	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (from study: $(STUDY_NAME)) ---"

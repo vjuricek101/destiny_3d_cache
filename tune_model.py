@@ -1,95 +1,63 @@
 #!/usr/bin/env python3
-import argparse
-import os
-import sys
-import pandas as pd
-import optuna
-import train_model
-import numpy as np
+import os, sys, optuna, train_model
 
-def objective(trial, config):
-    """Optuna objective function for MLP hyperparameter search."""
-    # Start with default training args
+# ── Configuration ────────────────────────────────────────────
+TECH        = "SRAM"
+ARCH        = True
+TRIALS      = 30
+SAMPLE_SIZE = 50000
+EPOCHS      = 300
+PATIENCE    = 50
+STUDY_NAME  = "destiny_tune_v2"
+# ─────────────────────────────────────────────────────────────
+
+suffix    = "_arch" if ARCH else ""
+data_path = f"pareto/{TECH}{suffix}/{TECH}{suffix}_full_data.csv"
+
+def objective(trial):
     args = train_model.parse_args(args=[])
-    
-    # Suggest architecture
-    args.tech       = config["tech"]
-    args.n_blocks   = trial.suggest_int("n_blocks", 4, 16)
-    args.lr         = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-    args.dropout    = trial.suggest_float("dropout", 0.2, 0.5)
-    
-    # Suggest loss weights for [Latency, Area, Energy, Leakage]
-    args.alpha      = [1.0,
-                       trial.suggest_float("alpha_area", 1.0, 10.0),
-                       trial.suggest_float("alpha_energy", 1.0, 10.0),
-                       trial.suggest_float("alpha_leak", 1.0, 10.0)]
-    
-    args.data        = config["data"]
-    args.sample_size = config["sample_size"]
-    args.epochs      = config.get("epochs", 300)
-    args.patience    = config.get("patience", 40)
-    args.output_dir  = os.path.join("model_output", "tuning", f"{config['study_name']}_trial_{trial.number}")
+    args.tech       = TECH
+    args.data       = data_path
+    args.sample_size = SAMPLE_SIZE
+    args.epochs     = EPOCHS
+    args.patience   = PATIENCE
+    args.output_dir = f"model_output/tuning/{STUDY_NAME}_trial_{trial.number}"
     args.eval_on_test = False
 
-    # Execution
-    _, _, _, metrics, _, _ = train_model.train(args, trial=trial)  
+    args.hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
+    args.n_blocks   = trial.suggest_int("n_blocks", 2, 10)
+    args.lr         = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
+    args.dropout    = trial.suggest_float("dropout", 0.2, 0.5)
+    args.alpha      = [
+        trial.suggest_float("alpha_lat",    1.0, 4.0),
+        trial.suggest_float("alpha_energy", 1.0, 4.0),
+        trial.suggest_float("alpha_area",   1.0, 5.0),
+        trial.suggest_float("alpha_leak",   2.0, 10.0),
+    ]
 
-    total_error = sum([
-        metrics["Read Latency (ns)_Log10_MSE"],
-        metrics["Area (mm^2)_Log10_MSE"],
-        metrics["Write Energy (nJ)_Log10_MSE"],
-        metrics["Leakage (mW)_Log10_MSE"]
-    ])
+    _, _, _, metrics, _, _ = train_model.train(args, trial=trial)
 
-    return total_error
+    targets = ["Read Latency (ns)", "Write Energy (nJ)", "Area (mm^2)", "Leakage (mW)"]
+    total   = sum(metrics[f"{t}_Log10_MSE"] for t in targets)
 
-def main():
-    parser = argparse.ArgumentParser(description="Unified Hyperparameter Tuner")
-    parser.add_argument("--tech",        default="SRAM", help="Memory technology (SRAM, RRAM, eDRAM, ALL)")
-    parser.add_argument("--arch",        action="store_true", help="Tune on architectural sweep data")
-    parser.add_argument("--trials",      type=int, default=20, help="Number of tuning trials")
-    parser.add_argument("--sample-size", type=int, default=50000, help="Max samples for tuning")
-    parser.add_argument("--epochs",      type=int, default=300)
-    parser.add_argument("--study-name",  default="destiny_tune_v1")
-    args = parser.parse_args()
+    for t in targets:
+        trial.set_user_attr(f"val_log_mse_{t}", metrics[f"{t}_Log10_MSE"])
 
-    # Determine Data Path
-    suffix = "_arch" if args.arch else ""
-    if args.tech.upper() == "ALL":
-        data_path = f"pareto/pareto{suffix}.csv"
-    else:
-        data_path = f"pareto/{args.tech}{suffix}/{args.tech}{suffix}_full_data.csv"
+    return total
 
-    if not os.path.exists(data_path):
-        print(f"ERROR: Data path not found: {data_path}")
-        sys.exit(1)
+if not os.path.exists(data_path):
+    sys.exit(f"ERROR: Data not found: {data_path}")
 
-    config = {
-        "data":        data_path,
-        "tech":        args.tech.upper(),
-        "sample_size": args.sample_size,
-        "epochs":      args.epochs,
-        "study_name":  args.study_name,
-        "is_arch":     args.arch
-    }
+study = optuna.create_study(
+    study_name = STUDY_NAME,
+    storage    = "sqlite:///optuna_study.db",
+    load_if_exists = True,
+    direction  = "minimize",
+    pruner     = optuna.pruners.MedianPruner(n_warmup_steps=50, n_startup_trials=10),
+)
 
-    study = optuna.create_study(
-        study_name=args.study_name, 
-        storage="sqlite:///optuna_study.db",
-        load_if_exists=True, 
-        direction="minimize",
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=50)
-    )
-    
-    print(f"TUNING: Study '{args.study_name}' (Arch Mode: {args.arch})")
-    print(f"DATA:   {data_path}")
-    
-    study.optimize(lambda t: objective(t, config), n_trials=args.trials)
-    
-    print(f"\nBest Loss: {study.best_value:.6f} | Trial: {study.best_trial.number}")
-    for k, v in study.best_params.items():
-        print(f"  {k:15}: {v}")
+study.optimize(objective, n_trials=TRIALS)
 
-
-if __name__ == "__main__":
-    main()
+print(f"\nBest Loss: {study.best_value:.6f} | Trial: {study.best_trial.number}")
+for k, v in study.best_params.items():
+    print(f"  {k:15}: {v}")
