@@ -15,9 +15,11 @@ pareto/
 # ML Operations & Databases
 optuna_study.db
 model_output/**/*
+!model_output/**/
 !model_output/**/*.csv
 !model_output/**/*.png
 !model_output/**/*.json
+model_output/tuning/
 
 # Environments & Agents
 venv/
