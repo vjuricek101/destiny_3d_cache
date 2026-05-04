@@ -17,15 +17,16 @@ I_OFF_PER_METER: Dict[int, float] = {22: 100e-9, 32: 50e-9, 45: 20e-9, 65: 5e-9}
 # Configuration
 MEMORY_CONFIGS = {
     "SRAM": {
-        "BASE_CELL_FILE": "config/sample_SRAM.cell",  # 65nm baseline
+        "BASE_CELL_FILE": "config/sample_SRAM.cell",
         "VALID_NODES": [22, 32, 45, 65],
         "VARIATION_RANGES": {
-            # CellArea is derived from widths — not sampled directly.
-            # MinSenseVoltage is derived from AccessCMOSWidth — not sampled directly.
-            "SRAMCellNMOSWidth (F)": (2.0, 3.5),
-            "SRAMCellPMOSWidth (F)": (1.5, 3.0),
-            "AccessCMOSWidth (F)":   (2.0, 3.5),
-            "CellAspectRatio":       (0.8, 2.0),
+            "CellArea (F^2)":        (40.0, 200.0),
+            "SRAMCellNMOSWidth (F)": (1.0, 2.5),
+            "SRAMCellPMOSWidth (F)": (1.0, 2.5),
+            "AccessCMOSWidth (F)":   (1.0, 2.5),
+            "CellAspectRatio":       (0.8, 2.5),
+            "ReadVoltage (V)":       (0.5, 1.2),
+            "MinSenseVoltage (mV)":  (5.0, 50.0),
         }
     },
     "RRAM": {

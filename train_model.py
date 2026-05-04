@@ -34,9 +34,7 @@ CATEGORICAL_COLS = [
 FORCE_NUMERIC_COLS = ["CellInput_ResetVoltage (V)", "CellInput_SetVoltage (V)", "CellInput_ReadVoltage (V)"]
 
 LOG_NUMERIC_COLS = [
-    "capacity_kb", "data_total_mats", "data_total_banks",
-    "data_num_row_subarray", "data_num_col_subarray", "data_subarray_num_row",
-    "data_subarray_num_col", "data_stacked_die_count",
+    "capacity_kb",
     "CellInput_CellArea (F^2)", "CellInput_SRAMCellNMOSWidth (F)", "CellInput_SRAMCellPMOSWidth (F)",
     "CellInput_AccessCMOSWidth (F)", "CellInput_ResistanceOnAtSetVoltage (ohm)",
     "CellInput_ResistanceOffAtSetVoltage (ohm)", "CellInput_ResistanceOnAtResetVoltage (ohm)",
@@ -50,9 +48,7 @@ LOG2_CFG_COLS  = ["word_width_bits", "associativity", "data_stacked_die_count"]
 BINARY_CFG_COLS = ["internal_sensing"]
 
 LINEAR_NUMERIC_COLS = [
-    "temperature_K", "data_mux_sense_amp", "data_mux_output_lev2",
-    "data_num_active_mat_per_row", "data_num_active_mat_per_col",
-    "data_num_active_subarray_per_row", "data_num_active_subarray_per_col", "data_num_row_per_set",
+    "temperature_K",
 ]
 
 _NVM_DROPS = [
@@ -108,6 +104,8 @@ class PPA_MLP(nn.Module):
         for block in self.blocks:
             x = block(x)
         return self.output_head(x)
+        
+# TODO: SECOND MODEL (FEASIBILITY) 
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
@@ -132,23 +130,33 @@ def build_features(df, extra_drop_cols=None):
     if present:
         df[present] = df[present].apply(pd.to_numeric, errors="coerce")
 
-    # Derived features capturing nonlinear physical relationships
-    if "capacity_kb"               in df.columns: df["derived_sqrt_capacity"] = np.sqrt(df["capacity_kb"])
-    if "CellInput_CellArea (F^2)"  in df.columns: df["derived_sqrt_area"]     = np.sqrt(df["CellInput_CellArea (F^2)"])
-    if "CellInput_ReadVoltage (V)" in df.columns: df["derived_read_v_sq"]     = df["CellInput_ReadVoltage (V)"] ** 2
+    # Derived features — computed before log transforms
+    if "capacity_kb" in df.columns:
+        df["derived_sqrt_capacity"] = np.sqrt(df["capacity_kb"])
+    if "CellInput_CellArea (F^2)" in df.columns:
+        df["derived_sqrt_area"]     = np.sqrt(df["CellInput_CellArea (F^2)"])
+    if "CellInput_ReadVoltage (V)" in df.columns:
+        df["derived_read_v_sq"]     = df["CellInput_ReadVoltage (V)"] ** 2
+    if all(c in df.columns for c in ["capacity_kb", "data_stacked_die_count"]):
+        df["derived_cap_per_die"]   = df["capacity_kb"] / df["data_stacked_die_count"]
+    if all(c in df.columns for c in ["capacity_kb", "word_width_bits", "data_stacked_die_count"]):
+        df["derived_rows_per_die"]  = (df["capacity_kb"] * 1024) / (df["word_width_bits"] * df["data_stacked_die_count"])
 
-    # Drop targets, metadata, and tech-specific irrelevant columns
+    # Drop targets, metadata, structural DESTINY outputs, and tech-specific columns
     drop_list = set(TARGET_COLS + DROP_COLS + (extra_drop_cols or []))
+    drop_list.update(c for c in df.columns if (c.startswith("data_") or c.startswith("tag_"))
+                    and c != "data_stacked_die_count")
     df = df.drop(columns=[c for c in drop_list if c in df.columns])
+
+    # Log transforms (capacity_kb becomes log10 here)
     df = apply_transforms(df)
 
-    # One-hot encode categorical columns
-    cat_cols = [c for c in CATEGORICAL_COLS if c in df.columns]
-    df = pd.get_dummies(df, columns=cat_cols, dummy_na=False)
+    # One-hot encode categoricals
+    df = pd.get_dummies(df, columns=[c for c in CATEGORICAL_COLS if c in df.columns], dummy_na=False)
 
-    # Interaction features: device roadmap × log10(capacity) to capture roadmap-scaling effects
-    for col in [c for c in df.columns if c.startswith("device_roadmap_")]:
-        df[f"{col}_x_log10_cap"] = df[col] * df["capacity_kb"]
+    # Roadmap × log10(capacity) interactions — capacity_kb is already log10 at this point
+    for rm_col in [c for c in df.columns if c.startswith("device_roadmap_") and "_x_" not in c]:
+        df[f"{rm_col}_x_log10_cap"] = df[rm_col] * df["capacity_kb"]
 
     return df.apply(pd.to_numeric, errors="coerce").fillna(0).astype(np.float32)
 
@@ -178,7 +186,7 @@ def filter_physical_failures(df):
     n = len(df)
     df = df[
         (df["cache_hit_latency_ns"] < 100) & (df["cache_area_mm2"] < 1000) &
-        (df["cache_hit_energy_nJ"]  < 1000) & (df["cache_leakage_mW"] > 0) &
+        (df["cache_write_energy_nJ"]  < 1000) & (df["cache_leakage_mW"] > 0) &
         (df["cache_leakage_mW"] < 1e7)
     ]
     if len(df) < n:

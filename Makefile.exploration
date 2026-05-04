@@ -6,7 +6,7 @@ MODE ?= standard
 # Memory type: SRAM, RRAM, eDRAM, or ALL
 TYPE ?= ALL
 # Number of variants to generate per technology (only applies to standard mode)
-NUM_VARIANTS ?= 2000
+NUM_VARIANTS ?= 500
 # Technologies handled by the ALL logic
 TECHS = SRAM RRAM eDRAM
 # Optuna study name — shared between tune and train so best HPs are picked up

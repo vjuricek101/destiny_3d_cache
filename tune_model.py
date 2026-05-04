@@ -8,7 +8,7 @@ TRIALS      = 30
 SAMPLE_SIZE = 50000
 EPOCHS      = 300
 PATIENCE    = 50
-STUDY_NAME  = "destiny_tune_v2"
+STUDY_NAME  = "destiny_tune"
 # ─────────────────────────────────────────────────────────────
 
 suffix    = "_arch" if ARCH else ""
@@ -29,10 +29,10 @@ def objective(trial):
     args.lr         = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
     args.dropout    = trial.suggest_float("dropout", 0.2, 0.5)
     args.alpha      = [
-        trial.suggest_float("alpha_lat",    1.0, 4.0),
+        trial.suggest_float("alpha_lat",    1.0, 10.0),
         trial.suggest_float("alpha_energy", 1.0, 4.0),
         trial.suggest_float("alpha_area",   1.0, 5.0),
-        trial.suggest_float("alpha_leak",   2.0, 10.0),
+        trial.suggest_float("alpha_leak",   1.0, 5.0),
     ]
 
     _, _, _, metrics, _, _ = train_model.train(args, trial=trial)
