@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""train_model.py — DESTINY surrogate ML model"""
+"""train_model.py — DESTINY surrogate ML model
+Does not include internal_sensing for non-SRAM technologies to improve performance.
+"""
 
 import argparse, json, os, pickle, sys, warnings
 import numpy as np
@@ -23,8 +25,6 @@ DROP_COLS = [
     "cache_miss_latency_ns", "cache_write_latency_ns", "cache_refresh_latency_ns",
     "cache_miss_energy_nJ", "cache_write_energy_nJ", "cache_refresh_energy_nJ",
     "cache_refresh_power_W", "CellInput_MemCellType", "CellInput_ProcessNode",
-    "data_total_mats", "data_total_banks", "data_num_row_subarray", "data_num_col_subarray",
-    "data_subarray_num_row", "data_subarray_num_col",
 ]
 
 CATEGORICAL_COLS = [
@@ -36,7 +36,7 @@ CATEGORICAL_COLS = [
 FORCE_NUMERIC_COLS = ["CellInput_ResetVoltage (V)", "CellInput_SetVoltage (V)", "CellInput_ReadVoltage (V)"]
 
 LOG_NUMERIC_COLS = [
-    "capacity_kb", 
+    "capacity_kb",
     "CellInput_CellArea (F^2)", "CellInput_SRAMCellNMOSWidth (F)", "CellInput_SRAMCellPMOSWidth (F)",
     "CellInput_AccessCMOSWidth (F)", "CellInput_ResistanceOnAtSetVoltage (ohm)",
     "CellInput_ResistanceOffAtSetVoltage (ohm)", "CellInput_ResistanceOnAtResetVoltage (ohm)",
@@ -46,19 +46,11 @@ LOG_NUMERIC_COLS = [
     "CellInput_ReadEnergy (pJ)", "CellInput_ResetEnergy (pJ)", "CellInput_SetEnergy (pJ)",
 ]
 
-LOG2_CFG_COLS = [
-    "word_width_bits", "associativity", "data_stacked_die_count",
-    "data_mux_sense_amp", "data_mux_output_lev2",
-    "data_num_active_mat_per_row", "data_num_active_mat_per_col",
-    "data_num_row_per_set",
-]
+LOG2_CFG_COLS  = ["word_width_bits", "associativity", "data_stacked_die_count"]
+BINARY_CFG_COLS = ["internal_sensing"]
 
-# Columns that pass through untransformed (linear scale):
-# - internal_sensing: binary (0/1), dropped for SRAM/eDRAM via TECH_DROP_COLS
-# - temperature_K, data_mux_*, data_num_active_*, data_num_row_per_set: linear numeric
 LINEAR_NUMERIC_COLS = [
     "temperature_K",
-    "data_num_active_subarray_per_row", "data_num_active_subarray_per_col",
 ]
 
 _NVM_DROPS = [
@@ -83,7 +75,6 @@ TECH_DROP_COLS = {
     "eDRAM": _NVM_DROPS + _SRAM_EDRAM_EXTRA,
     "RRAM":  _RRAM_SRAM_DROPS + ["CellInput_MinSenseVoltage (mV)"],
 }
-
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 
@@ -155,6 +146,8 @@ def build_features(df, extra_drop_cols=None):
 
     # Drop targets, metadata, structural DESTINY outputs, and tech-specific columns
     drop_list = set(TARGET_COLS + DROP_COLS + (extra_drop_cols or []))
+    drop_list.update(c for c in df.columns if (c.startswith("data_") or c.startswith("tag_"))
+                    and c != "data_stacked_die_count")
     df = df.drop(columns=[c for c in drop_list if c in df.columns])
 
     # Log transforms (capacity_kb becomes log10 here)
@@ -519,7 +512,7 @@ if __name__ == "__main__":
                  if args.tech != "ALL" else "pareto/full_data.csv")
 
     if args.output_dir == "model_output":
-        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}{suffix}_full_with_data_params")
+        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}{suffix}_full")
 
     if not os.path.exists(args.data):
         sys.exit(f"ERROR: Training data not found: {args.data}")

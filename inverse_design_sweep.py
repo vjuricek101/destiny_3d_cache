@@ -1,9 +1,3 @@
-#!/usr/bin/env python3
-"""
-benchmark.py
-****** TODO NEEDS EDITS ONCE SWEEPING CELL CONFIGURATIONS — CELL VALUES CURRENTLY FIXED AT DEFAULTS ******
-"""
-
 import os, sys, argparse, subprocess, warnings
 import numpy as np
 import pandas as pd
@@ -66,7 +60,7 @@ def select_median(df, x_col, y_col, n_bins):
 
 # ── DESTINY validation ────────────────────────────────────────────────────────
 
-def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac,
+def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read_voltage,
                           node=32, roadmap="HP", timeout=60, is_arch=False):
     """Run DESTINY with the given design parameters; return PPA dict or None."""
     if is_arch:
@@ -84,7 +78,19 @@ def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac,
 -ProcessNode: {node}
 """
     else:
-        cell_content = "something!!!!!!!"
+        cell_area = 60 + 20 * (wn + wac) + 10 * wp
+        min_sense = 80 / wac
+        cell_content = f"""
+-MemCellType: SRAM
+-CellArea (F^2): {cell_area:.4f}
+-SRAMCellNMOSWidth (F): {wn:.4f}
+-SRAMCellPMOSWidth (F): {wp:.4f}
+-AccessCMOSWidth (F): {wac:.4f}
+-AccessType: CMOS
+-MinSenseVoltage (mV): {min_sense:.4f}
+-ReadVoltage (V): {read_voltage:.4f}
+-ProcessNode: {node}
+"""
 
     cfg_content = f"""
 -OptimizationTarget: Full
@@ -138,6 +144,7 @@ def row_to_context(row, roadmap):
     ctx["_wn"]   = float(row.get("CellInput_SRAMCellNMOSWidth (F)", 2.5))
     ctx["_wp"]   = float(row.get("CellInput_SRAMCellPMOSWidth (F)", 2.0))
     ctx["_wac"]  = float(row.get("CellInput_AccessCMOSWidth (F)",   2.5))
+    ctx["_read_voltage"] = float(row.get("CellInput_ReadVoltage (V)", 1.0))
     ctx["_temp"] = int(row.get("temperature_K", 350))
     return ctx
 
@@ -247,7 +254,8 @@ def main():
             "word_width_bits":        design.get("word_width_bits"),
             "associativity":          design.get("associativity"),
             "data_stacked_die_count": design.get("data_stacked_die_count"),
-            "_wn": ctx["_wn"], "_wp": ctx["_wp"], "_wac": ctx["_wac"], "_temp": ctx["_temp"],
+            "_wn": ctx["_wn"], "_wp": ctx["_wp"], "_wac": ctx["_wac"],
+            "_read_voltage": ctx["_read_voltage"], "_temp": ctx["_temp"],
             "destiny_x": None, "destiny_y": None,
             "destiny_err_x_pct": None, "destiny_err_y_pct": None,
             "destiny_mean_abs_err_pct": None,
@@ -277,6 +285,7 @@ def main():
                 assoc=int(row.associativity), stack=int(row.data_stacked_die_count),
                 temp=int(row["_temp"]), wn=float(row["_wn"]),
                 wp=float(row["_wp"]), wac=float(row["_wac"]),
+                read_voltage=float(row["_read_voltage"]),
                 node=args.node, roadmap=args.roadmap,
                 timeout=args.destiny_timeout, is_arch=args.arch,
             )

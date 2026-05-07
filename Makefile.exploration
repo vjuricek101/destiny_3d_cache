@@ -6,7 +6,7 @@ MODE ?= standard
 # Memory type: SRAM, RRAM, eDRAM, or ALL
 TYPE ?= ALL
 # Number of variants to generate per technology (only applies to standard mode)
-NUM_VARIANTS ?= 500
+NUM_VARIANTS ?= 20000
 # Technologies handled by the ALL logic
 TECHS = SRAM RRAM eDRAM
 # Optuna study name — shared between tune and train so best HPs are picked up
@@ -26,6 +26,7 @@ ifeq ($(MODE), arch)
 	INV_DESIGN_SCRIPT = inverse_design.py
 	SUFFIX = _arch
 	ARCH_FLAG = --arch
+	NUM_VAR_FLAG =
 else
 	GENERATE_SCRIPT = generate_cells.py
 	EXPLORE_SCRIPT  = run_exploration.py
@@ -36,6 +37,7 @@ else
 	INV_DESIGN_SCRIPT = inverse_design.py
 	SUFFIX =
 	ARCH_FLAG =
+	NUM_VAR_FLAG = --num_variants $(NUM_VARIANTS)
 endif
 
 
@@ -72,7 +74,7 @@ kill:
 
 generate:
 	@echo "--- Step 1: Generating cells (MODE=$(MODE), TYPE=$(TYPE)) ---"
-	python3 $(GENERATE_SCRIPT) --type $(TYPE)
+	python3 $(GENERATE_SCRIPT) --type $(TYPE) $(NUM_VAR_FLAG)
 
 explore:
 	@echo "--- Step 2: Running parallel simulations for $(TYPE)$(SUFFIX) ---"
@@ -108,7 +110,7 @@ endif
 
 tune:
 	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) (study: $(STUDY_NAME)) ---"
-	python3 $(TUNE_SCRIPT)
+	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --study-name $(STUDY_NAME)
 
 train:
 	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (from study: $(STUDY_NAME)) ---"
