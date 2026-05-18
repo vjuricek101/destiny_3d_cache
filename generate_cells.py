@@ -7,6 +7,8 @@ import shutil
 import sys
 from typing import Dict, Any, List, Optional
 
+from destiny_utils import derive_sram_physical_params
+
 # Physics Tables
 VDD_TABLE: Dict[int, float] = {22: 0.9, 32: 1.0, 45: 1.1, 65: 1.2} # for RRAM high-boost-ratio check.
 VDD_EDRAM: Dict[int, float] = {65: 1.2, 45: 1.1, 32: 1.0}
@@ -34,7 +36,7 @@ MEMORY_CONFIGS = {
         "VALID_NODES": [22, 32, 45, 65],
         "VARIATION_RANGES": {
             # CellArea is derived from AccessType (CMOS vs diode/none).
-            # SetPulse is derived from Ron and SetVoltage — not sampled directly.
+            # SetPulse is derived from Ron and SetVoltage -- not sampled directly.
             "ResistanceOnAtSetVoltage (ohm)":  (5_000,   50_000),
             "ResistanceOffAtSetVoltage (ohm)": (100_000, 5_000_000),
             "ReadVoltage (V)":                 (0.2, 0.8),
@@ -50,7 +52,7 @@ MEMORY_CONFIGS = {
         "VALID_NODES": [32, 45, 65],
         "VARIATION_RANGES": {
             # CellArea is derived from AccessWidth and Capacitance.
-            # MinSenseVoltage is derived from DRAMCellCapacitance — not sampled directly.
+            # MinSenseVoltage is derived from DRAMCellCapacitance -- not sampled directly.
             "CellAspectRatio":         (0.8, 2.5),
             "AccessCMOSWidth (F)":     (1.0, 2.5),
             # Broad range; per-node CCELL_MAX is enforced at sample time.
@@ -122,12 +124,12 @@ def max_retention_from_cell(c_cell: float, access_width_f: float,
               I_leak = I_off_per_meter * W_access_m
     """
     i_off = I_OFF_PER_METER[process_node]
-    w_access_m = access_width_f * process_node * 1e-9   # F × nm → m
+    w_access_m = access_width_f * process_node * 1e-9   # F x nm -> m
     i_leak = i_off * w_access_m
     if i_leak <= 0:
         return float('inf')
     vdd = VDD_EDRAM[process_node]
-    return (c_cell * vdd / 2.0) / i_leak * 1e6          # convert s → us
+    return (c_cell * vdd / 2.0) / i_leak * 1e6          # convert s -> us
 
 
 # Physics Constraint Validation
@@ -163,7 +165,7 @@ def valid_rram(p: Dict[str, Any]) -> bool:
         vset  = float(p["SetVoltage (V)"])
         pulse = float(p["SetPulse (ns)"])
 
-        # Realistic resistance window (10× to 10 000×).
+        # Realistic resistance window (10x to 10 000x).
         if roff / ron < 10 or roff / ron > 1e4:  return False
         if pulse < 2 or pulse > 50:               return False
         if vset < 1.5 or vset > 5.0:             return False
@@ -244,13 +246,8 @@ def generate_synthetic_cells(mem_type: str, num_variants: int):
 
         # Per-node clamping & FinFET quantization
         if mem_type == "SRAM":
-            wn  = new_params["SRAMCellNMOSWidth (F)"]
-            wp  = new_params["SRAMCellPMOSWidth (F)"]
-            wac = new_params["AccessCMOSWidth (F)"]
-
-            new_params["CellArea (F^2)"]        = 60 + 20 * (wn + wac) + 10 * wp
-            # MinSenseVoltage derived from access width (not sampled independently).
-            new_params["MinSenseVoltage (mV)"]  = (80 / wac) * random.uniform(0.8, 1.2)
+            # Layout-aware area + Pelgrom mismatch model
+            derive_sram_physical_params(new_params, process_node)
 
         elif mem_type == "eDRAM":
             wac = new_params["AccessCMOSWidth (F)"]
@@ -297,15 +294,15 @@ def generate_synthetic_cells(mem_type: str, num_variants: int):
                 new_params["ResistanceOffAtResetVoltage (ohm)"] = r_off
                 new_params["ResistanceOffAtReadVoltage (ohm)"]  = r_off * random.uniform(0.8, 1.0)
 
-            # SetPulse derived from Ron and SetVoltage — stronger drive + lower
-            # resistance → faster switching.  Sampling independently would inject
+            # SetPulse derived from Ron and SetVoltage -- stronger drive + lower
+            # resistance -> faster switching.  Sampling independently would inject
             # random noise into the feature space.
             ron   = new_params["ResistanceOnAtSetVoltage (ohm)"]
             vset  = new_params["SetVoltage (V)"]
             pulse = (ron / (vset ** 2)) * random.uniform(0.5, 2.0)
             new_params["SetPulse (ns)"] = max(2, min(pulse, 50))
 
-            # -- High-boost-ratio flag: Vset > 2×VDD requires a charge pump.
+            # -- High-boost-ratio flag: Vset > 2xVDD requires a charge pump.
             # DESTINY models the overhead but does not reject the cell.
             # Flag these for downstream analysis (severe area/energy penalties).
             vdd = VDD_TABLE[process_node]

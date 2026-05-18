@@ -6,8 +6,11 @@ Makefile.dep
 # Generated design space data (Large CSVs)
 # Large data directories
 exploration_results/
+failed_exploration/
 synthetic_cells/
 temp_configs/
+debug_configs/
+benchmark_results/
 pareto/
 !pareto/*.png
 !pareto/summaries/
@@ -21,6 +24,8 @@ model_output/**/*
 !model_output/**/*.json
 model_output/tuning/
 
+
+
 # Environments & Agents
 venv/
 .gemini/
@@ -33,3 +38,4 @@ validation_temp.*
 __pycache__/
 *.pyc
 .DS_Store
+

@@ -4,20 +4,23 @@ import os, sys, argparse, optuna, train_model
 def parse_args():
     p = argparse.ArgumentParser(description="Tune DESTINY PPA surrogate model hyperparameters")
     p.add_argument("--tech",        default="SRAM")
-    p.add_argument("--arch",        action="store_true")
     p.add_argument("--trials",      type=int,   default=30)
     p.add_argument("--sample-size", type=int,   default=50000)
     p.add_argument("--epochs",      type=int,   default=300)
     p.add_argument("--patience",    type=int,   default=50)
     p.add_argument("--study-name",  default="destiny_tune")
+    p.add_argument("--feasibility", action="store_true", help="Tune two-head model on valid+failed data.")
     return p.parse_args()
 
 def objective(trial, args):
     # Base training arguments
     train_args = train_model.parse_args(args=[])
     train_args.tech        = args.tech
-    train_args.arch        = args.arch
-    train_args.data        = f"pareto/{args.tech}{'_arch' if args.arch else ''}/{args.tech}{'_arch' if args.arch else ''}_full_data.csv"
+    train_args.feasibility = args.feasibility
+    if args.feasibility:
+        train_args.data = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
+    else:
+        train_args.data = f"pareto/{args.tech}/{args.tech}_full_data.csv"
     train_args.sample_size = args.sample_size
     train_args.epochs      = args.epochs
     train_args.patience    = args.patience
@@ -25,13 +28,14 @@ def objective(trial, args):
     train_args.eval_on_test = False
 
     # Suggested hyperparameters
-    train_args.hidden_dim = trial.suggest_categorical("hidden_dim", [64, 128, 256, 512])
-    train_args.n_blocks   = trial.suggest_int("n_blocks", 2, 10)
-    train_args.lr         = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-    train_args.dropout    = trial.suggest_float("dropout", 0.2, 0.5)
-    train_args.alpha      = [
-        trial.suggest_float("alpha_lat",    1.0, 10.0),
-        trial.suggest_float("alpha_energy", 1.0, 4.0),
+    train_args.hidden_dim   = trial.suggest_categorical("hidden_dim", [128, 256, 512, 1024])
+    train_args.n_blocks     = trial.suggest_int("n_blocks", 3, 10)
+    train_args.lr           = trial.suggest_float("lr", 5e-5, 3e-3, log=True)
+    train_args.weight_decay = trial.suggest_float("weight_decay", 1e-4, 1e-1, log=True)
+    train_args.dropout      = trial.suggest_float("dropout", 0.1, 0.5)
+    train_args.alpha        = [
+        trial.suggest_float("alpha_lat",    1.0, 5.0),
+        trial.suggest_float("alpha_energy", 1.0, 5.0),
         trial.suggest_float("alpha_area",   1.0, 5.0),
         trial.suggest_float("alpha_leak",   1.0, 5.0),
     ]
@@ -49,8 +53,10 @@ def objective(trial, args):
 if __name__ == "__main__":
     args = parse_args()
     
-    suffix    = "_arch" if args.arch else ""
-    data_path = f"pareto/{args.tech}{suffix}/{args.tech}{suffix}_full_data.csv"
+    if args.feasibility:
+        data_path = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
+    else:
+        data_path = f"pareto/{args.tech}/{args.tech}_full_data.csv"
     
     if not os.path.exists(data_path):
         sys.exit(f"ERROR: Data not found: {data_path}")

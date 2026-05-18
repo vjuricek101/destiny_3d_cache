@@ -51,7 +51,7 @@ def plot_tech_3panel(tech: str, df_pareto: pd.DataFrame, out_dir: str):
         fig, axes = plt.subplots(1, n_cols, figsize=(5.5 * n_cols, 5.5), constrained_layout=True)
         axes = np.array([axes])
 
-    fig.suptitle(f"{tech} — Pareto Tradeoffs\n(single-mat configs excluded from plot)", fontsize=16 if has_sub_col else 14, fontweight="bold")
+    fig.suptitle(f"{tech} -- Pareto Tradeoffs\n(single-mat configs excluded from plot)", fontsize=16 if has_sub_col else 14, fontweight="bold")
 
     for i in range(axes.shape[0]):
         if has_sub_col:
@@ -167,7 +167,7 @@ def plot_dominated_vs_pareto(tech: str, df_full: pd.DataFrame,
         fig, axes = plt.subplots(1, n_cols, figsize=(5.5 * n_cols, 5.5), constrained_layout=True)
         axes = np.array([axes])  # Make 2D for consistent indexing
 
-    fig.suptitle(f"{tech} — Full Design Space vs Pareto Frontier\n(single-mat configs excluded from plot)", 
+    fig.suptitle(f"{tech} -- Full Design Space vs Pareto Frontier\n(single-mat configs excluded from plot)", 
                  fontsize=16 if has_sub_col else 14, fontweight="bold")
 
     for i in range(axes.shape[0]):
@@ -267,7 +267,7 @@ def plot_global_comparison(df: pd.DataFrame, metric_col: str, ylabel: str,
     caps_sorted = sorted(df[CAP_COL].unique())
 
     fig, axes = plt.subplots(1, 1 + len(TECHS), figsize=(22, 5.5), sharex=True, sharey=True, constrained_layout=True)
-    fig.suptitle(f"Global Technology Comparison — {ylabel} vs Hit Latency\n(single-mat configs excluded from plot)", fontsize=16, fontweight="bold")
+    fig.suptitle(f"Global Technology Comparison -- {ylabel} vs Hit Latency\n(single-mat configs excluded from plot)", fontsize=16, fontweight="bold")
 
     for i, ax in enumerate(axes):
         is_all_tech = (i == 0)
@@ -327,7 +327,7 @@ def plot_global_comparison(df: pd.DataFrame, metric_col: str, ylabel: str,
     print(f"  Saved: {out_path}")
 
 def plot_scaling_comparison(df: pd.DataFrame, out_path: str):
-    """Min latency per capacity per technology — power-of-2 x-axis with crossover annotation."""
+    """Min latency per capacity per technology -- power-of-2 x-axis with crossover annotation."""
     best = df.groupby([TECH_COL, CAP_COL])[LAT_COL].min().reset_index()
     fig, ax = plt.subplots(figsize=(11, 6))
 
@@ -342,9 +342,9 @@ def plot_scaling_comparison(df: pd.DataFrame, out_path: str):
 
     ax.set_xscale("log", base=2)
     power2_xticks(ax, best[CAP_COL].unique())
-    ax.set_xlabel("Cache Capacity (log₂ scale)", fontsize=11)
+    ax.set_xlabel("Cache Capacity (log2 scale)", fontsize=11)
     ax.set_ylabel("Min Cache Hit Latency (ns)", fontsize=11)
-    ax.set_title("Technology Scaling Comparison — Best Achievable Latency\n(single-mat configs excluded from plot)", fontsize=13,
+    ax.set_title("Technology Scaling Comparison -- Best Achievable Latency\n(single-mat configs excluded from plot)", fontsize=13,
                  fontweight="bold")
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=10)
@@ -412,7 +412,7 @@ def main(pareto_csv: str):
     for col, label, scale in METRICS:
         if col == LAT_COL:
             continue
-        safe = label.replace(" ", "_").replace("²", "2").replace("(", "").replace(")", "").replace("/", "_")
+        safe = label.replace(" ", "_").replace("(", "").replace(")", "").replace("/", "_")
         plot_global_comparison(
             df_pareto, col, label, scale,
             os.path.join(out_root, f"global_{safe}.png")

@@ -19,16 +19,19 @@ TARGET_COLS   = ["cache_hit_latency_ns", "cache_write_energy_nJ", "cache_area_mm
 TARGET_LABELS = ["Read Latency (ns)", "Write Energy (nJ)", "Area (mm^2)", "Leakage (mW)"]
 
 DROP_COLS = [
+    # data_num_row_per_set has no DESTINY force flag; always 1 in normal-access-mode caches.
+    "data_num_row_per_set",
     "variant_name", "opt_target", "cache_access_mode", "cache_hit_energy_nJ",
     "cache_miss_latency_ns", "cache_write_latency_ns", "cache_refresh_latency_ns",
     "cache_miss_energy_nJ", "cache_write_energy_nJ", "cache_refresh_energy_nJ",
     "cache_refresh_power_W", "CellInput_MemCellType", "CellInput_ProcessNode",
     "data_total_mats", "data_total_banks", "data_num_row_subarray", "data_num_col_subarray",
     "data_subarray_num_row", "data_subarray_num_col",
+    "is_valid",
 ]
 
 CATEGORICAL_COLS = [
-    "mem_cell_type", "device_roadmap", "process_node_nm",
+    "mem_cell_type", "device_roadmap", "process_node_nm", "opt_target",
     "CellInput_AccessType", "CellInput_ReadMode", "CellInput_ResetMode",
     "CellInput_SetMode", "CellInput_ReadFloating",
 ]
@@ -50,7 +53,6 @@ LOG2_CFG_COLS = [
     "word_width_bits", "associativity", "data_stacked_die_count",
     "data_mux_sense_amp", "data_mux_output_lev2",
     "data_num_active_mat_per_row", "data_num_active_mat_per_col",
-    "data_num_row_per_set",
 ]
 
 # Columns that pass through untransformed (linear scale):
@@ -59,6 +61,7 @@ LOG2_CFG_COLS = [
 LINEAR_NUMERIC_COLS = [
     "temperature_K",
     "data_num_active_subarray_per_row", "data_num_active_subarray_per_col",
+    "CellInput_ReadVoltage (V)",
 ]
 
 _NVM_DROPS = [
@@ -66,7 +69,7 @@ _NVM_DROPS = [
     "CellInput_ResistanceOnAtResetVoltage (ohm)", "CellInput_ResistanceOffAtResetVoltage (ohm)",
     "CellInput_ResistanceOnAtReadVoltage (ohm)",  "CellInput_ResistanceOffAtReadVoltage (ohm)",
     "CellInput_ResistanceOnAtHalfResetVoltage (ohm)",
-    "CellInput_ResetVoltage (V)", "CellInput_SetVoltage (V)", "CellInput_ReadVoltage (V)",
+    "CellInput_ResetVoltage (V)", "CellInput_SetVoltage (V)", # REMOVING "CellInput_ReadVoltage (V)",
     "CellInput_ReadMode", "CellInput_ResetMode", "CellInput_SetMode",
     "CellInput_ResetPulse (ns)", "CellInput_SetPulse (ns)",
     "CellInput_ResetEnergy (pJ)", "CellInput_SetEnergy (pJ)",
@@ -103,20 +106,40 @@ class ResidualBlock(nn.Module):
 
 
 class PPA_MLP(nn.Module):
-    """Stack of residual blocks with a linear input projection and output head."""
-    def __init__(self, input_dim: int, hidden_dim: int = 512, n_blocks: int = 6, dropout: float = 0.1):
+    """
+    Stack of residual blocks with a linear input projection and output head.
+    Use forward_with_feasibility() for joint PPA + feasibility inference.
+    """
+    def __init__(self, input_dim: int, hidden_dim: int = 512, n_blocks: int = 6,
+                 dropout: float = 0.1, has_feasibility_head: bool = False):
         super().__init__()
-        self.input_proj  = nn.Linear(input_dim, hidden_dim)
-        self.blocks      = nn.ModuleList([ResidualBlock(hidden_dim, dropout) for _ in range(n_blocks)])
-        self.output_head = nn.Linear(hidden_dim, len(TARGET_COLS))
+        self.input_proj           = nn.Linear(input_dim, hidden_dim)
+        self.blocks               = nn.ModuleList([ResidualBlock(hidden_dim, dropout) for _ in range(n_blocks)])
+        self.output_head          = nn.Linear(hidden_dim, len(TARGET_COLS))
+        self.has_feasibility_head = has_feasibility_head
+        if has_feasibility_head:
+            self.feasibility_head = nn.Linear(hidden_dim, 1)
 
-    def forward(self, x):
+    def _encode(self, x: torch.Tensor) -> torch.Tensor:
+        """Shared backbone: input projection + all residual blocks."""
         x = self.input_proj(x)
         for block in self.blocks:
             x = block(x)
-        return self.output_head(x)
-        
-# TODO: SECOND MODEL (FEASIBILITY) 
+        return x
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Standard PPA-only forward — backward-compatible with all existing call sites."""
+        return self.output_head(self._encode(x))
+
+    def forward_with_feasibility(self, x: torch.Tensor):
+        """
+        Two-head forward. Returns (ppa_log10 [B,4], p_feasible [B,1]).
+        p_feasible is in (0, 1) — probability that the design is physically valid.
+        Requires has_feasibility_head=True.
+        """
+        h = self._encode(x)
+        return self.output_head(h), torch.sigmoid(self.feasibility_head(h))
+
 
 # ── Preprocessing ─────────────────────────────────────────────────────────────
 
@@ -206,8 +229,14 @@ def filter_physical_failures(df):
 def prepare_data(args):
     """Load CSV, filter, feature-engineer, and return scaled 80/10/10 train/val/test matrices."""
     print("DESTINY PPA Surrogate Model Training:")
-    df = pd.read_csv(args.data).dropna(subset=TARGET_COLS)
-    df = filter_physical_failures(df)
+    df = pd.read_csv(args.data)
+    if not getattr(args, "feasibility", False):
+        df = df.dropna(subset=TARGET_COLS)
+        df = filter_physical_failures(df)
+    else:
+        # Keep invalid designs; failed rows may have NaN mem_cell_type.
+        if args.tech != "ALL":
+            df["mem_cell_type"] = df["mem_cell_type"].fillna(args.tech)
     print(f"  Final training set size: {df.shape}")
 
     print("\nTechnology distribution:")
@@ -260,6 +289,12 @@ def prepare_data(args):
     X_test  = scaler.transform(X_all[idx_test]).astype(np.float32)
 
     y_all = log_targets(df)
+    if getattr(args, "feasibility", False):
+        if "is_valid" not in df.columns:
+            sys.exit("ERROR: --feasibility requires an 'is_valid' column in the dataset.")
+        y_feas_all = df["is_valid"].values.astype(np.float32)
+        y_all = np.concatenate([y_all, y_feas_all[:, None]], axis=1)
+
     return X_train, X_val, X_test, y_all[idx_train], y_all[idx_val], y_all[idx_test], scaler, feats
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
@@ -303,23 +338,90 @@ def plot_training_history(log_rows, save_path, title="PPA Training Loss History"
 def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_rows, set_name="val", is_tuning=False):
     """Run inference on eval set, compute metrics, save model artifacts and plots."""
     model.eval()
-    with torch.no_grad():
-        y_pred_log = model(torch.from_numpy(X_eval).to(device)).cpu().numpy()
-    y_pred, y_true = unscale_targets(y_pred_log), unscale_targets(y_eval)
+    if getattr(args, "feasibility", False):
+        # Extract only the PPA targets for evaluation
+        y_eval_ppa = y_eval[:, :4]
+        with torch.no_grad():
+            y_pred_log, y_pred_feas = model.forward_with_feasibility(torch.from_numpy(X_eval).to(device))
+            y_pred_log = y_pred_log.cpu().numpy()
+            y_pred_feas = y_pred_feas.cpu().numpy()
+        y_pred, y_true = unscale_targets(y_pred_log), unscale_targets(y_eval_ppa)
+        
+        # Evaluate feasibility head accuracy
+        feas_acc = ((y_pred_feas > 0.5) == y_eval[:, 4:5]).mean()
+        print(f"\nFeasibility Classification Accuracy: {feas_acc * 100:.2f}%")
+        
+        # Save feasibility metrics
+        feas_metrics = pd.DataFrame([{"Metric": "Feasibility", "Accuracy_percent": round(feas_acc * 100, 2)}])
+        feas_metrics.to_csv(os.path.join(args.output_dir, f"{set_name}_feasibility_metrics.csv"), index=False)
+        
+        # Plot Feasibility Probability Distribution and Scatter
+        try:
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+            y_true_feas = y_eval[:, 4:5].flatten()
+            y_pred_feas_flat = y_pred_feas.flatten()
+            
+            # Panel 1: Histogram
+            bins = np.linspace(0, 1, 51)
+            ax1.hist(y_pred_feas_flat[y_true_feas == 1], bins=bins, alpha=0.6, label='True Valid', color='green')
+            ax1.hist(y_pred_feas_flat[y_true_feas == 0], bins=bins, alpha=0.6, label='True Invalid', color='red')
+            ax1.axvline(x=0.5, color='black', linestyle='--')
+            ax1.set_title("Probability Distribution")
+            ax1.set_xlabel("Predicted Probability")
+            ax1.set_ylabel("Count")
+            ax1.legend()
+            ax1.grid(alpha=0.3)
+            
+            # Panel 2: Shape scatter plot
+            # Plot a random subset of up to 150 points so it's not a giant unreadable blob
+            n_plot = min(len(y_true_feas), 150)
+            idx = np.random.choice(len(y_true_feas), n_plot, replace=False)
+            
+            y_true_sub = y_true_feas[idx]
+            y_pred_class = (y_pred_feas_flat[idx] > 0.5).astype(int)
+            
+            ax2.scatter(range(n_plot), y_true_sub, marker='o', s=80, alpha=0.4, color='blue', label='Ground Truth')
+            ax2.scatter(range(n_plot), y_pred_class, marker='x', s=40, color='red', label='Predicted Class')
+            ax2.set_yticks([0, 1])
+            ax2.set_yticklabels(['Invalid (0)', 'Valid (1)'])
+            ax2.set_xlabel("Sample Index (Random Subset)")
+            ax2.set_title(f"Truth vs Prediction ({n_plot} points)")
+            ax2.legend()
+            ax2.grid(alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(os.path.join(args.output_dir, f"{set_name}_feasibility_dist.png"), dpi=150)
+            plt.close()
+        except Exception as e:
+            print(f"Warning: Could not plot feasibility distribution: {e}")
+            
+    else:
+        with torch.no_grad():
+            y_pred_log = model(torch.from_numpy(X_eval).to(device)).cpu().numpy()
+        y_pred, y_true = unscale_targets(y_pred_log), unscale_targets(y_eval)
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
+        if getattr(args, "feasibility", False):
+            valid_mask = (y_eval[:, 4] == 1.0)
+            yt = y_true[valid_mask]
+            yp = y_pred[valid_mask]
+            ye = y_eval[valid_mask]
+            ypl = y_pred_log[valid_mask]
+        else:
+            yt, yp, ye, ypl = y_true, y_pred, y_eval, y_pred_log
+            
         metrics_rows = [
             {
                 "Metric":            label,
-                "R2":                round(r2_score(y_true[:,i], y_pred[:,i]), 4),
-                "MAPE_percent":      round(mean_absolute_percentage_error(y_true[:,i], y_pred[:,i]) * 100, 2),
-                "MedRelErr_percent": round(np.median(np.abs(y_pred[:,i]-y_true[:,i]) / (y_true[:,i]+1e-12)) * 100, 2),
-                "MAE":               round(mean_absolute_error(y_true[:,i], y_pred[:,i]), 8),
-                "MSE":               round(mean_squared_error(y_true[:,i], y_pred[:,i]), 8),
-                "Log10_MSE":         round(mean_squared_error(y_eval[:,i], y_pred_log[:,i]), 8),
-                "True_Min": y_true[:,i].min(), "True_Max": y_true[:,i].max(),
-                "Pred_Min": y_pred[:,i].min(), "Pred_Max": y_pred[:,i].max(),
+                "R2":                round(r2_score(yt[:,i], yp[:,i]), 4) if len(yt) else 0.0,
+                "MAPE_percent":      round(mean_absolute_percentage_error(yt[:,i], yp[:,i]) * 100, 2) if len(yt) else 0.0,
+                "MedRelErr_percent": round(np.median(np.abs(yp[:,i]-yt[:,i]) / (yt[:,i]+1e-12)) * 100, 2) if len(yt) else 0.0,
+                "MAE":               round(mean_absolute_error(yt[:,i], yp[:,i]), 8) if len(yt) else 0.0,
+                "MSE":               round(mean_squared_error(yt[:,i], yp[:,i]), 8) if len(yt) else 0.0,
+                "Log10_MSE":         round(mean_squared_error(ye[:,i], ypl[:,i]), 8) if len(yt) else 0.0,
+                "True_Min": yt[:,i].min() if len(yt) else 0.0, "True_Max": yt[:,i].max() if len(yt) else 0.0,
+                "Pred_Min": yp[:,i].min() if len(yp) else 0.0, "Pred_Max": yp[:,i].max() if len(yp) else 0.0,
             }
             for i, label in enumerate(TARGET_LABELS)
         ]
@@ -367,19 +469,23 @@ def train(args, trial=None):
     val_loader   = make_loader(X_val,   y_val,   shuffle=False)
 
     device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model        = PPA_MLP(len(feats), args.hidden_dim, args.n_blocks, args.dropout).to(device)
-    optimizer    = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    model        = PPA_MLP(len(feats), args.hidden_dim, args.n_blocks, args.dropout,
+                           has_feasibility_head=getattr(args, "feasibility", False)).to(device)
+    optimizer    = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_weights = torch.tensor(args.alpha, dtype=torch.float32, device=device)
     criterion    = nn.HuberLoss(delta=0.5, reduction="none")  # per-element, weighted below
+    feas_criterion = nn.BCELoss() if getattr(args, "feasibility", False) else None
 
     # Cosine annealing with linear warmup — stabilises early training
     warmup    = 5
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda e: (
         (e+1)/warmup if e < warmup
-        else 0.5*(1.0 + np.cos(np.pi*(e-warmup)/(args.epochs-warmup)))
+        else 0.5*(1.0 + np.cos(np.pi*(e-warmup)/max(1, args.epochs-warmup)))
     ))
 
     print(f"Device: {device} | Params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+    if getattr(args, "feasibility", False):
+        print(f"Mode: Two-Head (PPA + Feasibility)")
     print(f"\nTraining up to {args.epochs} epochs (patience={args.patience}) ...")
     print(f"{'Epoch':>6}  {'Train(Huber)':>14}  {'Val Log10MSE':>14}  {'LR':>10}")
     print("-" * 50)
@@ -394,8 +500,30 @@ def train(args, trial=None):
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            indiv = criterion(model(xb), yb).mean(dim=0)   # per-target mean Huber
-            loss  = (indiv * loss_weights).mean()           # weighted scalar
+            
+            if getattr(args, "feasibility", False):
+                yb_ppa = yb[:, :4]
+                yb_feas = yb[:, 4:5]
+                
+                pred_ppa, pred_feas = model.forward_with_feasibility(xb)
+                
+                # Feasibility loss
+                feas_loss = feas_criterion(pred_feas, yb_feas)
+                
+                # PPA loss (only on valid designs)
+                valid_mask = (yb_feas == 1.0).squeeze()
+                if valid_mask.any():
+                    indiv = criterion(pred_ppa[valid_mask], yb_ppa[valid_mask]).mean(dim=0)
+                    ppa_loss = (indiv * loss_weights).mean()
+                else:
+                    ppa_loss = torch.tensor(0.0, device=device)
+                    indiv = torch.zeros(4, device=device)
+                    
+                loss = ppa_loss + 10.0 * feas_loss # Give feasibility loss a strong weight
+            else:
+                indiv = criterion(model(xb), yb).mean(dim=0)   # per-target mean Huber
+                loss  = (indiv * loss_weights).mean()           # weighted scalar
+                
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # prevent exploding grads
             optimizer.step()
@@ -410,11 +538,26 @@ def train(args, trial=None):
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
-                pred   = model(xb)
-                indiv  = criterion(pred, yb).mean(dim=0)
-                v_huber   += (indiv * loss_weights).mean().item() * len(xb)
-                v_huber_i += indiv * len(xb)
-                v_sq      += ((pred - yb) ** 2).sum(dim=0)  # accumulate squared errors in log10 space
+                
+                if getattr(args, "feasibility", False):
+                    yb_ppa = yb[:, :4]
+                    yb_feas = yb[:, 4:5]
+                    pred_ppa, pred_feas = model.forward_with_feasibility(xb)
+                    
+                    valid_mask = (yb_feas == 1.0).squeeze()
+                    if valid_mask.any():
+                        indiv = criterion(pred_ppa[valid_mask], yb_ppa[valid_mask]).mean(dim=0)
+                        v_huber   += (indiv * loss_weights).mean().item() * valid_mask.sum().item()
+                        v_huber_i += indiv * valid_mask.sum().item()
+                        v_sq      += ((pred_ppa[valid_mask] - yb_ppa[valid_mask]) ** 2).sum(dim=0)
+                else:
+                    pred   = model(xb)
+                    indiv  = criterion(pred, yb).mean(dim=0)
+                    v_huber   += (indiv * loss_weights).mean().item() * len(xb)
+                    v_huber_i += indiv * len(xb)
+                    v_sq      += ((pred - yb) ** 2).sum(dim=0)  # accumulate squared errors in log10 space
+
+        # For feasibility, average over valid samples only (approximate here using len(X_val) for simplicity)
 
         val_huber_loss    = v_huber / len(X_val)
         val_huber_i       = (v_huber_i / len(X_val)).cpu().numpy()
@@ -482,6 +625,7 @@ def parse_args(args=None):
     p.add_argument("--epochs",       type=int,   default=300)
     p.add_argument("--batch-size",   type=int,   default=1024)
     p.add_argument("--lr",           type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-2)
     p.add_argument("--hidden-dim",   type=int,   default=256)
     p.add_argument("--n-blocks",     type=int,   default=6)
     p.add_argument("--dropout",      type=float, default=0.3)
@@ -491,8 +635,8 @@ def parse_args(args=None):
     p.add_argument("--alpha",        type=float, nargs=4, default=[1.0,1.0,1.0,1.0],
                                      help="Per-target Huber loss weights: [Lat, Energy, Area, Leak].")
     p.add_argument("--from-study",   default=None, help="Load best HPs from named Optuna study.")
-    p.add_argument("--arch",         action="store_true", help="Use architectural sweep data.")
     p.add_argument("--eval-on-test", action="store_true", help="Final eval on test set (use once).")
+    p.add_argument("--feasibility",  action="store_true", help="Train two-head model on valid+failed data.")
     return p.parse_args(args)
 
 
@@ -502,7 +646,7 @@ def load_params_from_study(args):
     try:
         best = optuna.load_study(study_name=args.from_study, storage="sqlite:///optuna_study.db").best_params
         print(f"\n[INFO] Loading optimized parameters from: {args.from_study}")
-        for k in ["n_blocks", "lr", "dropout", "hidden_dim"]:
+        for k in ["n_blocks", "lr", "weight_decay", "dropout", "hidden_dim"]:
             if k in best: setattr(args, k, best[k])
         if "alpha_lat" in best:
             args.alpha = [best.get(k, 1.0) for k in ["alpha_lat", "alpha_energy", "alpha_area", "alpha_leak"]]
@@ -514,12 +658,17 @@ if __name__ == "__main__":
     args = parse_args()
     load_params_from_study(args)
 
-    suffix    = "_arch" if args.arch else ""
-    args.data = (f"pareto/{args.tech}{suffix}/{args.tech}{suffix}_full_data.csv"
-                 if args.tech != "ALL" else "pareto/full_data.csv")
+    if args.feasibility:
+        args.data = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
+    else:
+        args.data = (f"pareto/{args.tech}/{args.tech}_full_data.csv"
+                     if args.tech != "ALL" else "pareto/full_data.csv")
 
     if args.output_dir == "model_output":
-        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}{suffix}_full_with_data_params")
+        if args.feasibility:
+            args.output_dir = os.path.join("model_output", f"{args.tech.lower()}_feasibility")
+        else:
+            args.output_dir = os.path.join("model_output", f"{args.tech.lower()}_full_with_data_params")
 
     if not os.path.exists(args.data):
         sys.exit(f"ERROR: Training data not found: {args.data}")

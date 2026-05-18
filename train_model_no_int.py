@@ -361,7 +361,7 @@ def train(args, trial=None):
 
     device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model        = PPA_MLP(len(feats), args.hidden_dim, args.n_blocks, args.dropout).to(device)
-    optimizer    = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-2)
+    optimizer    = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_weights = torch.tensor(args.alpha, dtype=torch.float32, device=device)
     criterion    = nn.HuberLoss(delta=0.5, reduction="none")  # per-element, weighted below
 
@@ -475,6 +475,7 @@ def parse_args(args=None):
     p.add_argument("--epochs",       type=int,   default=300)
     p.add_argument("--batch-size",   type=int,   default=1024)
     p.add_argument("--lr",           type=float, default=1e-3)
+    p.add_argument("--weight-decay", type=float, default=1e-2)
     p.add_argument("--hidden-dim",   type=int,   default=256)
     p.add_argument("--n-blocks",     type=int,   default=6)
     p.add_argument("--dropout",      type=float, default=0.3)
@@ -484,7 +485,6 @@ def parse_args(args=None):
     p.add_argument("--alpha",        type=float, nargs=4, default=[1.0,1.0,1.0,1.0],
                                      help="Per-target Huber loss weights: [Lat, Energy, Area, Leak].")
     p.add_argument("--from-study",   default=None, help="Load best HPs from named Optuna study.")
-    p.add_argument("--arch",         action="store_true", help="Use architectural sweep data.")
     p.add_argument("--eval-on-test", action="store_true", help="Final eval on test set (use once).")
     return p.parse_args(args)
 
@@ -495,7 +495,7 @@ def load_params_from_study(args):
     try:
         best = optuna.load_study(study_name=args.from_study, storage="sqlite:///optuna_study.db").best_params
         print(f"\n[INFO] Loading optimized parameters from: {args.from_study}")
-        for k in ["n_blocks", "lr", "dropout", "hidden_dim"]:
+        for k in ["n_blocks", "lr", "weight_decay", "dropout", "hidden_dim"]:
             if k in best: setattr(args, k, best[k])
         if "alpha_lat" in best:
             args.alpha = [best.get(k, 1.0) for k in ["alpha_lat", "alpha_energy", "alpha_area", "alpha_leak"]]
@@ -507,12 +507,11 @@ if __name__ == "__main__":
     args = parse_args()
     load_params_from_study(args)
 
-    suffix    = "_arch" if args.arch else ""
-    args.data = (f"pareto/{args.tech}{suffix}/{args.tech}{suffix}_full_data.csv"
+    args.data = (f"pareto/{args.tech}/{args.tech}_full_data.csv"
                  if args.tech != "ALL" else "pareto/full_data.csv")
 
     if args.output_dir == "model_output":
-        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}{suffix}_full")
+        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}_full")
 
     if not os.path.exists(args.data):
         sys.exit(f"ERROR: Training data not found: {args.data}")

@@ -5,15 +5,20 @@ import torch.nn as nn
 import numpy as np
 import pandas as pd
 from train_model import PPA_MLP
-# TODO: import from train_model import FeasibilityClassifier
 import sys
 
-# Target column order must match the 4-output PPA model
 TARGET_KEYS   = ["cache_hit_latency_ns", "cache_write_energy_nJ", "cache_area_mm2", "cache_leakage_mW"]
 TARGET_LABELS = ["Latency", "Energy", "Area", "Leakage"]
 
-# Architectural parameters: [log10_cap, log2_ww, log2_assoc, log2_stack, ...]
-# Basic bounds: Cap 2KB–32MB, WW 64–2048 (2^6–2^11), Assoc 1–64 (2^0–2^6), Stack 1–16 (2^0–2^4)
+# Map target metric → DESTINY opt_target string
+TARGET_KEY_TO_OPT_TARGET = {
+    "cache_hit_latency_ns":  "Read Latency",
+    "cache_write_energy_nJ": "Write Energy",
+    "cache_area_mm2":        "Area",
+    "cache_leakage_mW":      "Leakage",
+}
+
+# Architectural bounds (log10 for capacity, log2 for everything else)
 BASE_ARCH_BOUNDS = [
     (np.log10(2),  np.log10(32768)),  # capacity_kb  (log10)
     (6,            11),               # word_width    (log2)
@@ -22,42 +27,112 @@ BASE_ARCH_BOUNDS = [
 ]
 BASE_ARCH_COLS = ["capacity_kb", "word_width_bits", "associativity", "data_stacked_die_count"]
 
-# Organizational 'data_' parameters that can be optionally included in optimization
 DATA_PARAM_BOUNDS_LOG2 = {
-    "data_mux_sense_amp":               (0, 8),   # 1–256
-    "data_mux_output_lev2":             (0, 8),   # 1–256
-    "data_num_active_mat_per_row":      (0, 9),   # 1–512
-    "data_num_active_mat_per_col":      (0, 9),   # 1–512
-    "data_num_row_per_set":             (0, 8),   # 1–256
+    "data_mux_sense_amp":           (0, 6),
+    "data_mux_output_lev2":         (0, 6),
+    "data_num_active_mat_per_row":  (0, 4),
+    "data_num_active_mat_per_col":  (0, 4),
 }
-
 DATA_PARAM_BOUNDS_LINEAR = {
     "data_num_active_subarray_per_row": (1, 2),
     "data_num_active_subarray_per_col": (1, 2),
 }
 
-SRAM_CELL_PARAM_BOUNDS_LINEAR = {
-    "CellInput_SRAMCellNMOSWidth (F)": (1.0, 2.5),
-    "CellInput_SRAMCellPMOSWidth (F)": (1.0, 2.5),
-    "CellInput_AccessCMOSWidth (F)":   (1.0, 2.5),
-    "CellInput_ReadVoltage (V)":        (0.5, 1.2),
+_MUX_VALID = [1, 2, 4, 8, 16, 32, 64]
+_MAT_VALID = [1, 2, 4, 8, 16]
+
+def _nearest_valid(val: int, valid_set: list) -> int:
+    return min(valid_set, key=lambda v: abs(v - val))
+
+SRAM_CELL_BOUNDS_LOG10 = {
+    "CellInput_SRAMCellNMOSWidth (F)": (2.2, 2.5),
+    "CellInput_SRAMCellPMOSWidth (F)": (1.0, 1.1),
+    "CellInput_AccessCMOSWidth (F)":   (1.1, 1.25),
+}
+SRAM_CELL_BOUNDS_LINEAR = {
+    "CellInput_ReadVoltage (V)": (0.5, 1.2),
 }
 
+# -- Module-level helpers ------------------------------------------------------
+
+def _select_opt_target_col(targets, fixed_context):
+    """Return the opt_target one-hot column name matching the primary target metric."""
+    explicit = fixed_context.get("_opt_target")
+    if explicit:
+        return f"opt_target_{explicit}"
+    primary = next(iter(targets.keys()), "cache_hit_latency_ns")
+    return f"opt_target_{TARGET_KEY_TO_OPT_TARGET.get(primary, 'Read Latency')}"
+
+
+def _build_dyn_idx(feature_cols, opt_cols):
+    """Index of all columns updated per gradient step."""
+    dyn_keys = set(opt_cols) | {
+        "derived_sqrt_capacity", "derived_cap_per_die", "derived_rows_per_die",
+        "CellInput_CellArea (F^2)", "derived_sqrt_area", "derived_read_v_sq",
+    } | {f"device_roadmap_{rm}_x_log10_cap" for rm in ["HP", "LOP", "LSTP"]}
+    return {k: i for i, k in enumerate(feature_cols) if k in dyn_keys}
+
+
+def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, device):
+    """Compute SRAM cell derived features and write them into feature vector x (in-place)."""
+    from destiny_utils import derive_sram_physical_params
+    wn  = 10 ** log_vals[opt_cols.index("CellInput_SRAMCellNMOSWidth (F)")]
+    wp  = 10 ** log_vals[opt_cols.index("CellInput_SRAMCellPMOSWidth (F)")]
+    wac = 10 ** log_vals[opt_cols.index("CellInput_AccessCMOSWidth (F)")]
+    if "CellInput_ReadVoltage (V)" in opt_cols:
+        rv = log_vals[opt_cols.index("CellInput_ReadVoltage (V)")]
+    else:
+        rv = torch.tensor(float(fixed_context.get("CellInput_ReadVoltage (V)", 1.0)), device=device)
+    node = int([k for k in fixed_context if "process_node_nm_" in k][0].split("_")[-1])
+    p = {"SRAMCellNMOSWidth (F)": wn.item(), "SRAMCellPMOSWidth (F)": wp.item(), "AccessCMOSWidth (F)": wac.item()}
+    derive_sram_physical_params(p, node)
+    cell_area = p["CellArea (F^2)"]
+    if "CellInput_CellArea (F^2)" in dyn_idx:
+        x[dyn_idx["CellInput_CellArea (F^2)"]] = torch.log10(torch.tensor(cell_area, device=device))
+    if "derived_sqrt_area" in dyn_idx:
+        x[dyn_idx["derived_sqrt_area"]] = torch.sqrt(torch.tensor(cell_area, device=device))
+    if "derived_read_v_sq" in dyn_idx:
+        x[dyn_idx["derived_read_v_sq"]] = rv ** 2
+
+
+def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
+    """Convert continuous log-space optimised params to snapped physical values."""
+    design = {}
+    for col, lv in zip(opt_cols, final_log_vals):
+        if col in log10_cols:
+            if col == "capacity_kb":
+                val = 2 ** round(np.log2(10 ** lv))
+                design[col] = int(np.clip(val, 2, 32768))
+            else:
+                design[col] = 10 ** lv
+        elif col in log2_cols:
+            raw = int(2 ** round(lv))
+            if col in ("data_mux_sense_amp", "data_mux_output_lev2"):
+                design[col] = _nearest_valid(raw, _MUX_VALID)
+            elif col in ("data_num_active_mat_per_row", "data_num_active_mat_per_col"):
+                design[col] = _nearest_valid(raw, _MAT_VALID)
+            else:
+                design[col] = raw
+        elif col in linear_cols:
+            design[col] = int(round(lv)) if col in DATA_PARAM_BOUNDS_LINEAR else float(round(lv, 2))
+    return design
+
+
+# -- Optimizer -----------------------------------------------------------------
+
 class InverseOptimizer:
-    def __init__(self, tech, is_arch=False):
-        self.tech    = tech
-        self.device  = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    def __init__(self, tech, use_feasibility=False):
+        self.tech   = tech
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Prioritize the model with data params if it exists, otherwise fall back to standard
-        suffix_with_data = "_arch_full_with_data_params" if is_arch else "_full_with_data_params"
-        suffix_standard  = "_arch_full" if is_arch else "_full"
-        
-        model_dir = f"model_output/{tech.lower()}{suffix_with_data}"
+        if use_feasibility:
+            model_dir = f"model_output/{tech.lower()}_feasibility"
+        else:
+            model_dir = f"model_output/{tech.lower()}_full_with_data_params"
+            if not os.path.exists(model_dir):
+                model_dir = f"model_output/{tech.lower()}_full"
         if not os.path.exists(model_dir):
-            model_dir = f"model_output/{tech.lower()}{suffix_standard}"
-
-        if not os.path.exists(model_dir):
-            print(f"WARNING: Model directory {model_dir} not found, trying default 'model_output'")
+            print(f"WARNING: {model_dir} not found, trying default 'model_output'")
             model_dir = "model_output"
 
         with open(os.path.join(model_dir, "feature_cols.json")) as f:
@@ -65,54 +140,45 @@ class InverseOptimizer:
         with open(os.path.join(model_dir, "scaler.pkl"), "rb") as f:
             self.scaler = pickle.load(f)
 
-        # Infer architecture from saved state dict
-        sd        = torch.load(os.path.join(model_dir, "model.pt"), map_location=self.device)
-        hidden    = sd["input_proj.weight"].shape[0]
-        n_blocks  = max(int(k.split(".")[1]) for k in sd if k.startswith("blocks.")) + 1
-
-        self.model = PPA_MLP(len(self.feature_cols), hidden_dim=hidden, n_blocks=n_blocks).to(self.device)
+        sd       = torch.load(os.path.join(model_dir, "model.pt"), map_location=self.device)
+        hidden   = sd["input_proj.weight"].shape[0]
+        n_blocks = max(int(k.split(".")[1]) for k in sd if k.startswith("blocks.")) + 1
+        has_feas = "feasibility_head.weight" in sd
+        self.model = PPA_MLP(len(self.feature_cols), hidden_dim=hidden,
+                             n_blocks=n_blocks, has_feasibility_head=has_feas).to(self.device)
         self.model.load_state_dict(sd)
         self.model.eval()
 
         self.means = torch.tensor(self.scaler.mean_,  dtype=torch.float32, device=self.device)
         self.stds  = torch.tensor(self.scaler.scale_, dtype=torch.float32, device=self.device)
 
-        # Identify which columns in feature_cols are architectural/organizational inputs
-        self.opt_cols    = []
-        self.opt_bounds  = []
-        self.log10_cols  = []
-        self.log2_cols   = []
-        self.linear_cols = []
-        
-        # Add base architectural columns
+        self.opt_cols, self.opt_bounds = [], []
+        self.log10_cols, self.log2_cols, self.linear_cols = [], [], []
+
         for col, bound in zip(BASE_ARCH_COLS, BASE_ARCH_BOUNDS):
             if col in self.feature_cols:
-                self.opt_cols.append(col)
-                self.opt_bounds.append(bound)
-                if col == "capacity_kb":
-                    self.log10_cols.append(col)
-                else:
-                    self.log2_cols.append(col)
-        
-        # Add data organizational columns (log2 and linear)
+                self.opt_cols.append(col); self.opt_bounds.append(bound)
+                (self.log10_cols if col == "capacity_kb" else self.log2_cols).append(col)
+
         for col, bound in DATA_PARAM_BOUNDS_LOG2.items():
             if col in self.feature_cols:
-                self.opt_cols.append(col)
-                self.opt_bounds.append(bound)
+                self.opt_cols.append(col); self.opt_bounds.append(bound)
                 self.log2_cols.append(col)
 
         for col, bound in DATA_PARAM_BOUNDS_LINEAR.items():
             if col in self.feature_cols:
-                self.opt_cols.append(col)
-                self.opt_bounds.append(bound)
+                self.opt_cols.append(col); self.opt_bounds.append(bound)
                 self.linear_cols.append(col)
 
-        # Add SRAM cell parameters if tech is SRAM
         if self.tech == "SRAM":
-            for col, bound in SRAM_CELL_PARAM_BOUNDS_LINEAR.items():
+            for col, bound in SRAM_CELL_BOUNDS_LOG10.items():
                 if col in self.feature_cols:
                     self.opt_cols.append(col)
-                    self.opt_bounds.append(bound)
+                    self.opt_bounds.append((np.log10(bound[0]), np.log10(bound[1])))
+                    self.log10_cols.append(col)
+            for col, bound in SRAM_CELL_BOUNDS_LINEAR.items():
+                if col in self.feature_cols:
+                    self.opt_cols.append(col); self.opt_bounds.append(bound)
                     self.linear_cols.append(col)
 
     def _target_tensors(self, targets):
@@ -124,111 +190,131 @@ class InverseOptimizer:
             torch.tensor(weights, dtype=torch.float32, device=self.device),
         )
 
-    def optimize(self, targets, fixed_context, steps=300):
+    def optimize(self, targets, fixed_context, steps=300, n_restarts=4, target_weights=None):
+        """Gradient-based inverse design with multi-start."""
         t_tensor, w_tensor = self._target_tensors(targets)
+        if target_weights is not None:
+            if isinstance(target_weights, dict):
+                w_tensor = torch.tensor(
+                    [target_weights.get(k, 1.0 if k in targets else 0.0) for k in TARGET_KEYS],
+                    dtype=torch.float32, device=self.device)
+            else:
+                w_tensor = torch.tensor(target_weights, dtype=torch.float32, device=self.device)
 
-        # Indices of dynamically updated columns in the feature vector
-        dyn_keys = self.opt_cols + ["derived_sqrt_capacity", "derived_cap_per_die", "derived_rows_per_die",
-                                    "CellInput_CellArea (F^2)", "derived_sqrt_area", "derived_read_v_sq"] + \
-                   [f"device_roadmap_{rm}_x_log10_cap" for rm in ["HP", "LOP", "LSTP"]]
-        dyn_idx  = {k: i for i, k in enumerate(self.feature_cols) if k in dyn_keys}
+        dyn_idx = _build_dyn_idx(self.feature_cols, self.opt_cols)
 
-        # Static base vector — filled once from fixed_context
+        # Static base vector from fixed_context (dynamic cols filled per step)
         base_x = torch.zeros(len(self.feature_cols), device=self.device)
         for i, c in enumerate(self.feature_cols):
             if c not in dyn_idx:
                 base_x[i] = float(fixed_context.get(c, 0.0))
 
-        # Parameters in [0, 1] — mapped to physical log-space during optimisation
-        n_params = len(self.opt_cols)
-        params = torch.full((n_params,), 0.5, requires_grad=True, device=self.device)
-        opt    = torch.optim.Adam([params], lr=0.02)
+        # Condition on opt_target matching the primary target metric
+        for i, c in enumerate(self.feature_cols):
+            if c.startswith("opt_target_"):
+                base_x[i] = 1.0 if c == _select_opt_target_col(targets, fixed_context) else 0.0
 
-        lo_bound, hi_bound = zip(*self.opt_bounds)
-        lo_bound = torch.tensor(lo_bound, device=self.device)
-        hi_bound = torch.tensor(hi_bound, device=self.device)
+        lo_bound = torch.tensor([b[0] for b in self.opt_bounds], device=self.device)
+        hi_bound = torch.tensor([b[1] for b in self.opt_bounds], device=self.device)
 
-        for _ in range(steps):
-            opt.zero_grad()
+        best_loss, best_params, best_pred = float("inf"), None, None
 
-            # Map [0,1] -> physical log-space
-            log_vals = params * (hi_bound - lo_bound) + lo_bound
-            
-            # Extract capacity (log10) for derived features
-            cap_log10 = log_vals[self.opt_cols.index("capacity_kb")]
-            cap_phys  = 10 ** cap_log10
+        for restart in range(max(1, n_restarts)):
+            params = (torch.full((len(self.opt_cols),), 0.5, device=self.device)
+                      if restart == 0 else torch.rand(len(self.opt_cols), device=self.device))
+            params = params.requires_grad_(True)
+            inner_opt = torch.optim.Adam([params], lr=0.02)
 
-            # Build differentiable feature vector
-            x = base_x.clone()
-            for col, lv in zip(self.opt_cols, log_vals):
-                if col in dyn_idx: x[dyn_idx[col]] = lv
-            
-            if "derived_sqrt_capacity" in dyn_idx:
-                x[dyn_idx["derived_sqrt_capacity"]] = torch.sqrt(cap_phys)
-            
-            # die_count, ww in physical space for derived ratios
-            stk_phys = 2 ** log_vals[self.opt_cols.index("data_stacked_die_count")]
-            ww_phys  = 2 ** log_vals[self.opt_cols.index("word_width_bits")]
-            
-            if "derived_cap_per_die" in dyn_idx:
-                x[dyn_idx["derived_cap_per_die"]]  = cap_phys / stk_phys
-            if "derived_rows_per_die" in dyn_idx:
-                x[dyn_idx["derived_rows_per_die"]] = (cap_phys * 1024) / (ww_phys * stk_phys)
-            
-            # SRAM cell parameter optimization: Area and derived features computed from widths
-            if self.tech == "SRAM" and "CellInput_SRAMCellNMOSWidth (F)" in self.opt_cols:
-                wn  = log_vals[self.opt_cols.index("CellInput_SRAMCellNMOSWidth (F)")]
-                wp  = log_vals[self.opt_cols.index("CellInput_SRAMCellPMOSWidth (F)")]
-                wac = log_vals[self.opt_cols.index("CellInput_AccessCMOSWidth (F)")]
-                rv  = log_vals[self.opt_cols.index("CellInput_ReadVoltage (V)")]
+            for _ in range(steps):
+                inner_opt.zero_grad()
+                log_vals  = params * (hi_bound - lo_bound) + lo_bound
+                cap_log10 = log_vals[self.opt_cols.index("capacity_kb")]
+                cap_phys  = 10 ** cap_log10
 
-                cell_area = 60 + 20*(wn + wac) + 10*wp
-                if "CellInput_CellArea (F^2)" in dyn_idx:
-                    x[dyn_idx["CellInput_CellArea (F^2)"]] = torch.log10(cell_area)
-                if "derived_sqrt_area" in dyn_idx:
-                    x[dyn_idx["derived_sqrt_area"]] = torch.sqrt(cell_area)
-                if "derived_read_v_sq" in dyn_idx:
-                    x[dyn_idx["derived_read_v_sq"]] = rv ** 2
-            
-            for rm in ["HP", "LOP", "LSTP"]:
-                col = f"device_roadmap_{rm}_x_log10_cap"
-                if col in dyn_idx:
-                    x[dyn_idx[col]] = float(fixed_context.get(f"device_roadmap_{rm}", 0.0)) * cap_log10
+                x = base_x.clone()
+                for col, lv in zip(self.opt_cols, log_vals):
+                    if col in dyn_idx: x[dyn_idx[col]] = lv
 
-            pred = self.model(((x - self.means) / self.stds).unsqueeze(0))
-            loss = (w_tensor * (pred - t_tensor) ** 2).sum()
-            
-            # Penalty keeps params in [0, 1]
-            penalty = torch.relu(-params).sum() + torch.relu(params - 1.0).sum()
-            (loss + penalty).backward()
-            opt.step()
-            with torch.no_grad(): params.clamp_(0, 1)
+                if "derived_sqrt_capacity" in dyn_idx:
+                    x[dyn_idx["derived_sqrt_capacity"]] = torch.sqrt(cap_phys)
 
-        # Snap to valid hardware config
+                if "data_stacked_die_count" in self.opt_cols:
+                    stk_phys = 2 ** log_vals[self.opt_cols.index("data_stacked_die_count")]
+                else:
+                    stk_phys = torch.tensor(2 ** float(fixed_context.get("data_stacked_die_count", 0.0)), device=self.device)
+
+                if "word_width_bits" in self.opt_cols:
+                    ww_phys = 2 ** log_vals[self.opt_cols.index("word_width_bits")]
+                else:
+                    ww_phys = torch.tensor(2 ** float(fixed_context.get("word_width_bits", 6.0)), device=self.device)
+
+                if "derived_cap_per_die"  in dyn_idx:
+                    x[dyn_idx["derived_cap_per_die"]]  = cap_phys / stk_phys
+                if "derived_rows_per_die" in dyn_idx:
+                    x[dyn_idx["derived_rows_per_die"]] = (cap_phys * 1024) / (ww_phys * stk_phys)
+
+                if self.tech == "SRAM" and "CellInput_SRAMCellNMOSWidth (F)" in self.opt_cols:
+                    _update_sram_cell_features(x, dyn_idx, log_vals, self.opt_cols, fixed_context, self.device)
+
+                for rm in ["HP", "LOP", "LSTP"]:
+                    col = f"device_roadmap_{rm}_x_log10_cap"
+                    if col in dyn_idx:
+                        x[dyn_idx[col]] = float(fixed_context.get(f"device_roadmap_{rm}", 0.0)) * cap_log10
+
+                x_scaled = ((x - self.means) / self.stds).unsqueeze(0)
+                if self.model.has_feasibility_head:
+                    pred, p_feas    = self.model.forward_with_feasibility(x_scaled)
+                    learned_penalty = 50.0 * (1.0 - p_feas.squeeze())
+                else:
+                    pred            = self.model(x_scaled)
+                    learned_penalty = 0.0
+
+                loss    = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty
+                barrier = (torch.relu(-params) ** 2).sum() + (torch.relu(params - 1.0) ** 2).sum()
+                (loss + 100.0 * barrier).backward()
+
+                with torch.no_grad():
+                    params.grad[params <= 0] = params.grad[params <= 0].clamp(max=0)
+                    params.grad[params >= 1] = params.grad[params >= 1].clamp(min=0)
+                inner_opt.step()
+                with torch.no_grad(): params.data.clamp_(0, 1)
+
+            with torch.no_grad():
+                final_loss = loss.item()
+            if final_loss < best_loss:
+                best_loss, best_params, best_pred = final_loss, params.detach().clone(), pred.detach()
+
+        params, pred = best_params, best_pred
+
         with torch.no_grad():
-            final_log_vals = params * (hi_bound - lo_bound) + lo_bound
-            
-            design = {}
-            for col, lv in zip(self.opt_cols, final_log_vals.cpu().numpy()):
-                if col in self.log10_cols:
-                    if col == "capacity_kb":
-                        # Snap capacity to nearest power of 2
-                        val = 2 ** round(np.log2(10 ** lv))
-                        design[col] = int(np.clip(val, 2, 32768))
+            final_log_vals = (params * (hi_bound - lo_bound) + lo_bound).cpu().numpy()
+            design = _snap_design(self.opt_cols, final_log_vals,
+                                  self.log10_cols, self.log2_cols, self.linear_cols)
+
+            # Associativity was zero-variance in training sweep; always default to 4
+            if "associativity" not in design:
+                design["associativity"] = 4
+
+            # Enforce generate_cells.py SRAM constraints: gamma (wp<wac), beta (wn>=2*wac)
+            if self.tech == "SRAM" and "CellInput_SRAMCellNMOSWidth (F)" in design:
+                wn  = design["CellInput_SRAMCellNMOSWidth (F)"]
+                wp  = design["CellInput_SRAMCellPMOSWidth (F)"]
+                wac = design["CellInput_AccessCMOSWidth (F)"]
+                if wp / wac >= 1.0:
+                    if 0.9 * wac > 1.0:
+                        wp = float(round(0.9 * wac, 2))
                     else:
-                        design[col] = 10 ** lv
-                elif col in self.log2_cols:
-                    # Log2 snap: 2^round(lv)
-                    design[col] = int(2 ** round(lv))
-                elif col in self.linear_cols:
-                    if col in SRAM_CELL_PARAM_BOUNDS_LINEAR:
-                        # Widths and ReadVoltage snap to 2 decimal places
-                        design[col] = float(round(lv, 2))
-                    else:
-                        # Other linear (e.g. subarray count) snaps to nearest integer
-                        design[col] = int(round(lv))
-            
-            design.update(fixed_context)
+                        wac = float(round(min(1.0 / 0.9 + 0.01, 1.25), 2))
+                        wp  = float(round(min(0.9 * wac, 1.1), 2))
+                    design["CellInput_AccessCMOSWidth (F)"]   = wac
+                    design["CellInput_SRAMCellPMOSWidth (F)"] = wp
+                if wn / wac < 2.0:
+                    design["CellInput_SRAMCellNMOSWidth (F)"] = float(round(min(2.0 * wac, 2.5), 2))
+
+            # Add non-optimised context; decode log2-encoded stack to physical int
+            for k, v in fixed_context.items():
+                if k not in self.opt_cols:
+                    design[k] = int(2 ** float(v)) if k == "data_stacked_die_count" else v
 
             pred_ppa = 10 ** pred.detach().cpu().numpy()[0]
             ppa_dict = {label: pred_ppa[i] for i, label in enumerate(TARGET_LABELS)}
@@ -238,57 +324,49 @@ class InverseOptimizer:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="DESTINY Inverse Design Optimizer")
-    p.add_argument("--tech",             default="SRAM")
-    p.add_argument("--arch",             action="store_true",  help="Use architectural-only model")
-    p.add_argument("--target-latency",   type=float,           help="Target read latency (ns)")
-    p.add_argument("--target-area",      type=float,           help="Target cache area (mm²)")
-    p.add_argument("--target-energy",    type=float,           help="Target hit energy (nJ)")
-    p.add_argument("--target-leakage",   type=float,           help="Target leakage power (mW)")
-    p.add_argument("--node",             type=int,   default=32, choices=[22, 32, 45, 65])
-    p.add_argument("--roadmap",          default="HP",           choices=["HP", "LOP", "LSTP"])
-    p.add_argument("--temperature",      type=float, default=350.0, help="Temperature (K)")
-    p.add_argument("--output",           default=None,           help="CSV to append results to")
+    p.add_argument("--tech",           default="SRAM")
+    p.add_argument("--target-latency", type=float, help="Target read latency (ns)")
+    p.add_argument("--target-area",    type=float, help="Target cache area (mm2)")
+    p.add_argument("--target-energy",  type=float, help="Target hit energy (nJ)")
+    p.add_argument("--target-leakage", type=float, help="Target leakage power (mW)")
+    p.add_argument("--node",           type=int, default=32, choices=[22, 32, 45, 65])
+    p.add_argument("--roadmap",        default="HP", choices=["HP", "LOP", "LSTP"])
+    p.add_argument("--temperature",    type=float, default=350.0)
+    p.add_argument("--output",         default=None, help="CSV to append results to")
+    p.add_argument("--feasibility",    action="store_true")
     args = p.parse_args()
 
     targets = {k: v for k, v in [
-        ("cache_hit_latency_ns", args.target_latency),
-        ("cache_area_mm2",       args.target_area),
-        ("cache_write_energy_nJ",  args.target_energy),
-        ("cache_leakage_mW",     args.target_leakage),
+        ("cache_hit_latency_ns",  args.target_latency),
+        ("cache_area_mm2",        args.target_area),
+        ("cache_write_energy_nJ", args.target_energy),
+        ("cache_leakage_mW",      args.target_leakage),
     ] if v is not None}
 
     if not targets:
-        p.error("Specify at least one target: --target-latency / --target-area / --target-energy / --target-leakage")
+        p.error("Specify at least one target via --target-latency / --target-area / "
+                "--target-energy / --target-leakage")
 
     context = {
-        f"process_node_nm_{args.node}":  1.0,
+        f"process_node_nm_{args.node}":   1.0,
         f"device_roadmap_{args.roadmap}": 1.0,
         "temperature_K":                  args.temperature,
     }
 
-    design, ppa = InverseOptimizer(args.tech, is_arch=args.arch).optimize(targets, context)
+    design, ppa = InverseOptimizer(args.tech, use_feasibility=args.feasibility).optimize(targets, context)
 
-    # Technology context + optimized architectural/cell design
-    row = {
-        "tech": args.tech, "arch": args.arch, "node_nm": args.node,
-        "roadmap": args.roadmap, "temperature_K": args.temperature,
-    }
+    row = {"tech": args.tech, "node_nm": args.node,
+           "roadmap": args.roadmap, "temperature_K": args.temperature}
     row.update(design)
-
-    # Surrogate-predicted PPA
     row.update({
-        "pred_latency_ns":  ppa.get("Latency"),
-        "pred_area_mm2":    ppa.get("Area"),
-        "pred_energy_nJ":   ppa.get("Energy"),
-        "pred_leakage_mW":  ppa.get("Leakage"),
+        "pred_latency_ns": ppa.get("Latency"), "pred_area_mm2":   ppa.get("Area"),
+        "pred_energy_nJ":  ppa.get("Energy"),  "pred_leakage_mW": ppa.get("Leakage"),
     })
-
-    # Requested targets (NaN when not specified)
     row.update({
-        "target_latency_ns":  targets.get("cache_hit_latency_ns", float("nan")),
-        "target_area_mm2":    targets.get("cache_area_mm2",        float("nan")),
-        "target_energy_nJ":   targets.get("cache_write_energy_nJ",  float("nan")),
-        "target_leakage_mW":  targets.get("cache_leakage_mW",     float("nan")),
+        "target_latency_ns": targets.get("cache_hit_latency_ns",  float("nan")),
+        "target_area_mm2":   targets.get("cache_area_mm2",        float("nan")),
+        "target_energy_nJ":  targets.get("cache_write_energy_nJ", float("nan")),
+        "target_leakage_mW": targets.get("cache_leakage_mW",      float("nan")),
     })
 
     df_out = pd.DataFrame([row])

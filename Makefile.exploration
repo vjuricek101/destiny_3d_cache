@@ -5,12 +5,18 @@
 MODE ?= standard
 # Memory type: SRAM, RRAM, eDRAM, or ALL
 TYPE ?= ALL
+# Feasibility: yes or no (for two-head model)
+FEASIBILITY ?= no
 # Number of variants to generate per technology (only applies to standard mode)
-NUM_VARIANTS ?= 20000
+NUM_VARIANTS ?= 16000
 # Technologies handled by the ALL logic
 TECHS = SRAM RRAM eDRAM
 # Optuna study name — shared between tune and train so best HPs are picked up
-STUDY_NAME ?= destiny_$(TYPE)$(SUFFIX)
+ifeq ($(FEASIBILITY), yes)
+	STUDY_NAME ?= destiny_$(TYPE)$(SUFFIX)_feasibility
+else
+	STUDY_NAME ?= destiny_$(TYPE)$(SUFFIX)
+endif
 
 # --- Paths ---
 RAM_DIR = /dev/shm/vjuricek_destiny_tmp
@@ -38,6 +44,12 @@ else
 	SUFFIX =
 	ARCH_FLAG =
 	NUM_VAR_FLAG = --num_variants $(NUM_VARIANTS)
+endif
+
+ifeq ($(FEASIBILITY), yes)
+	FEAS_FLAG = --feasibility
+else
+	FEAS_FLAG =
 endif
 
 
@@ -101,20 +113,20 @@ plot:
 ml_pipeline:
 ifeq ($(TYPE), ALL)
 	@for tech in $(TECHS); do \
-		echo "--- Running ML Pipeline for $$tech ($(MODE)) ---"; \
-		$(MAKE) -f Makefile.exploration tune train TYPE=$$tech MODE=$(MODE); \
+		echo "--- Running ML Pipeline for $$tech ($(MODE), FEASIBILITY=$(FEASIBILITY)) ---"; \
+		$(MAKE) -f Makefile.exploration tune train TYPE=$$tech MODE=$(MODE) FEASIBILITY=$(FEASIBILITY); \
 	done
 else
-	@$(MAKE) -f Makefile.exploration tune train TYPE=$(TYPE) MODE=$(MODE)
+	@$(MAKE) -f Makefile.exploration tune train TYPE=$(TYPE) MODE=$(MODE) FEASIBILITY=$(FEASIBILITY)
 endif
 
 tune:
-	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) (study: $(STUDY_NAME)) ---"
-	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --study-name $(STUDY_NAME)
+	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) (FEASIBILITY=$(FEASIBILITY), study: $(STUDY_NAME)) ---"
+	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) $(FEAS_FLAG) --study-name $(STUDY_NAME)
 
 train:
-	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (from study: $(STUDY_NAME)) ---"
-	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) --from-study $(STUDY_NAME) --eval-on-test
+	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (FEASIBILITY=$(FEASIBILITY), from study: $(STUDY_NAME)) ---"
+	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) $(FEAS_FLAG) --from-study $(STUDY_NAME) --eval-on-test
 
 
 design:
