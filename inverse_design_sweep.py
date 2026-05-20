@@ -94,6 +94,7 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
 -Temperature (K): {temp}
 -DeviceRoadmap: {roadmap}
 -MemoryCellInputFile: {os.path.abspath(cell_file)}
+-ProcessNode: {node}
 """
     
     # Append forced layout parameters
@@ -233,20 +234,6 @@ def _layout_from_row(row):
     """Extract forced layout params present in a Series/dict as int, else None."""
     return {k: int(row[k]) for k in _LAYOUT_COLS if k in row.index and pd.notna(row[k])}
 
-def _check_physics_feasibility(row, assoc=4):
-    """Pre-validate physics feasibility before calling DESTINY."""
-    cap_bits, ww = row.get("capacity_kb", 0) * 8192, row.get("word_width_bits", 0)
-    layout = _layout_from_row(row)
-    mux = layout.get("data_mux_sense_amp", 1) * layout.get("data_mux_output_lev2", 1)
-    mats = (layout.get("data_num_active_mat_per_row", 1) * layout.get("data_num_active_mat_per_col", 1) *
-            layout.get("data_num_active_subarray_per_row", 1) * layout.get("data_num_active_subarray_per_col", 1))
-            
-    num_col = ww * mux
-    if cap_bits / (mats * num_col + 1e-9) < 1: return False, "numRow < 1"
-    if num_col > 1024: return False, f"numCol={num_col} > 1024"
-    if num_col * mats < ww * assoc: return False, "bits_per_mat < set_size"
-    return True, "ok"
-
 # -- Main Helpers --------------------------------------------------------------
 
 def _load_and_filter_data(args, data_csv, x_col, y_col):
@@ -279,31 +266,64 @@ def _run_optimization_sweep(df_target, df, opt, x_col, y_col, x_label, y_label, 
         opt_ctx = {k: v for k, v in ctx.items() if not k.startswith("_")}
         opt_ctx["data_stacked_die_count"] = 0.0 # Force 2D designs
         
-        design, ppa = opt.optimize(targets, opt_ctx, steps=args.opt_steps)
+        design, ppa, pre_snap, snapped_ppa = opt.optimize(targets, opt_ctx, steps=args.opt_steps, verbose=args.verbose_opt)
         surr_x, surr_y = ppa.get(METRIC_TO_PPA_LABEL.get(x_col, "")), ppa.get(METRIC_TO_PPA_LABEL.get(y_col, ""))
         
         errs = [abs(pct_err(v, t)) for v, t in [(surr_x, target_x), (surr_y, target_y)] if v is not None]
         surr_mean_err = float(np.mean(errs)) if errs else float("nan")
 
+        snapped_surr_x = snapped_ppa.get(METRIC_TO_PPA_LABEL.get(x_col, "")) if snapped_ppa else None
+        snapped_surr_y = snapped_ppa.get(METRIC_TO_PPA_LABEL.get(y_col, "")) if snapped_ppa else None
+        
+        snap_errs = [abs(pct_err(v, t)) for v, t in [(snapped_surr_x, target_x), (snapped_surr_y, target_y)] if v is not None]
+        snap_mean_err = float(np.mean(snap_errs)) if snap_errs else float("nan")
+
         x_pct, y_pct = float((df[x_col] <= target_x).mean() * 100), float((df[y_col] <= target_y).mean() * 100)
 
+        # Optimized cell params (public names so they aren't stripped from CSV)
+        opt_wn  = design.get("CellInput_SRAMCellNMOSWidth (F)", ctx["_wn"])
+        opt_wp  = design.get("CellInput_SRAMCellPMOSWidth (F)", ctx["_wp"])
+        opt_wac = design.get("CellInput_AccessCMOSWidth (F)",   ctx["_wac"])
+        opt_rv  = design.get("CellInput_ReadVoltage (V)",        ctx["_read_voltage"])
+
         records.append({
+            # --- metadata ---
+            "is_original": False,
             "target_idx": i, "x_percentile": x_pct, "y_percentile": y_pct,
-            "target_x": target_x, "target_y": target_y, "surr_x": surr_x, "surr_y": surr_y,
+            "node_nm": int(row["process_node_nm"]),
+            "target_x": target_x, "target_y": target_y, 
+            "surr_x": surr_x, "surr_y": surr_y,
             "surr_err_x_pct": pct_err(surr_x, target_x) if surr_x is not None else None,
             "surr_err_y_pct": pct_err(surr_y, target_y) if surr_y is not None else None,
             "surr_mean_abs_err_pct": surr_mean_err,
+            "post_snap_surr_x": snapped_surr_x, "post_snap_surr_y": snapped_surr_y,
+            "post_snap_surr_err_x_pct": pct_err(snapped_surr_x, target_x) if snapped_surr_x is not None else None,
+            "post_snap_surr_err_y_pct": pct_err(snapped_surr_y, target_y) if snapped_surr_y is not None else None,
+            "post_snap_surr_mean_abs_err_pct": snap_mean_err,
+            # --- original dataset inputs (the design that achieved the target PPA) ---
+            "orig_capacity_kb":            row.get("capacity_kb"),
+            "orig_word_width_bits":        row.get("word_width_bits"),
+            "orig_associativity":          row.get("associativity"),
+            "orig_data_stacked_die_count": row.get("data_stacked_die_count"),
+            **{f"orig_{k}": row.get(k) for k in _LAYOUT_COLS},
+            "orig_wn":  ctx["_wn"],  "orig_wp":  ctx["_wp"],
+            "orig_wac": ctx["_wac"], "orig_rv":  ctx["_read_voltage"],
+            # --- optimized inputs (what we re-injected into DESTINY) ---
             "capacity_kb": design.get("capacity_kb"), "word_width_bits": design.get("word_width_bits"),
             "associativity": design.get("associativity"), "data_stacked_die_count": design.get("data_stacked_die_count"),
             **{k: design.get(k) for k in _LAYOUT_COLS},
-            "_wn": design.get("CellInput_SRAMCellNMOSWidth (F)", ctx["_wn"]),
-            "_wp": design.get("CellInput_SRAMCellPMOSWidth (F)", ctx["_wp"]),
-            "_wac": design.get("CellInput_AccessCMOSWidth (F)", ctx["_wac"]),
-            "_read_voltage": design.get("CellInput_ReadVoltage (V)", ctx["_read_voltage"]),
+            "opt_wn": opt_wn, "opt_wp": opt_wp, "opt_wac": opt_wac, "opt_rv": opt_rv,
+            # --- private: used internally, stripped before saving ---
+            "_wn": opt_wn, "_wp": opt_wp, "_wac": opt_wac, "_read_voltage": opt_rv,
             "_temp": SRAM_TEMPERATURE_MAP.get(design.get("data_stacked_die_count", 1), ctx["_temp"]),
+            # --- DESTINY validation results (filled in step 5) ---
             "destiny_x": None, "destiny_y": None, "destiny_err_x_pct": None, "destiny_err_y_pct": None, "destiny_mean_abs_err_pct": None,
+            # --- pre-snap continuous values from the optimizer ---
+            **{f"pre_snap_{k}": v for k, v in pre_snap.items()},
         })
-        print(f"  [{i+1:3d}/{len(df_target)}] Target: {x_label.split()[0]}={target_x:.4g}{x_unit} (p{x_pct:.0f}), {y_label.split()[0]}={target_y:.4g}{y_unit} (p{y_pct:.0f})  ->  Surr: {surr_x:.4g}, {surr_y:.4g}  (err={surr_mean_err:.1f}%)")
+        print(f"  [{i+1:3d}/{len(df_target)}] Target: {x_label.split()[0]}={target_x:.4g}{x_unit} (p{x_pct:.0f}), {y_label.split()[0]}={target_y:.4g}{y_unit} (p{y_pct:.0f})\n"
+              f"         Pre-snap Surr:  {surr_x:.4g}, {surr_y:.4g}  (err={surr_mean_err:.1f}%)\n"
+              f"         Post-snap Surr: {snapped_surr_x:.4g}, {snapped_surr_y:.4g}  (err={snap_mean_err:.1f}%)")
     return pd.DataFrame(records)
 
 def _validate_top_designs(df_res, x_col, y_col, n_validate, args):
@@ -316,16 +336,17 @@ def _validate_top_designs(df_res, x_col, y_col, n_validate, args):
     for rank, ri in enumerate(df_res["surr_mean_abs_err_pct"].sort_values().head(n_validate).index, 1):
         row = df_res.loc[ri]
         ot = "ReadLatency"
+        node_val = int(row.get("node_nm", args.node))
         
         print(f"  Validating design #{rank}  (target_idx={int(row.target_idx)}, surr_err={row.surr_mean_abs_err_pct:.1f}%)\n"
-              f"    Cap={int(row.capacity_kb)}KB  WW={row.word_width_bits}  Assoc={row.associativity}  Stack={row.data_stacked_die_count}  OptTarget={ot}")
+              f"    Node={node_val}nm  Cap={int(row.capacity_kb)}KB  WW={row.word_width_bits}  Assoc={row.associativity}  Stack={row.data_stacked_die_count}  OptTarget={ot}")
 
         layout = _layout_from_row(row)
         destiny_ppa = validate_and_capture(
             tech=args.tech, cap_kb=int(row.capacity_kb), ww=int(row.word_width_bits),
             assoc=int(row.associativity), stack=max(1, int(row.data_stacked_die_count)),
             temp=int(row["_temp"]), wn=float(row["_wn"]), wp=float(row["_wp"]), wac=float(row["_wac"]), read_voltage=float(row["_read_voltage"]),
-            node=args.node, roadmap=args.roadmap, timeout=args.destiny_timeout, verbose=args.verbose_destiny, opt_target=ot,
+            node=node_val, roadmap=args.roadmap, timeout=args.destiny_timeout, verbose=args.verbose_destiny, opt_target=ot,
             mux_sa=layout.get("data_mux_sense_amp"), mux_ol2=layout.get("data_mux_output_lev2"),
             act_mat_col=layout.get("data_num_active_mat_per_col"), act_mat_row=layout.get("data_num_active_mat_per_row"),
             act_sub_col=layout.get("data_num_active_subarray_per_col"), act_sub_row=layout.get("data_num_active_subarray_per_row"),
@@ -385,8 +406,12 @@ def _plot_results(df_res, df, df_target, df_pareto_ref, x_col, y_col, x_label, y
     subtitle = f"{len(df_target)} targets, {args.n_bins} bins" if args.mode == "median" else f"{len(df_target)} Pareto points"
     ax.set_title(f"Inverse Optimizer vs {args.mode.capitalize()} Points  [{subtitle}]\n{args.tech} | {args.node}nm | {args.roadmap}", fontsize=12, fontweight="bold", pad=10)
 
-    ann_lines = [f"Surrogate  mean |err|: {s_errs.mean():.1f}% (n={len(s_errs)})"]
-    if len(d_errs) > 0: ann_lines.append(f"DESTINY    mean |err|: {d_errs.mean():.1f}% (n={len(d_errs)})")
+    post_s_errs = df_res["post_snap_surr_mean_abs_err_pct"].dropna()
+    ann_lines = [
+        f"Pre-snap Surr  mean |err|: {s_errs.mean():.1f}% (n={len(s_errs)})",
+        f"Post-snap Surr mean |err|: {post_s_errs.mean():.1f}% (n={len(post_s_errs)})"
+    ]
+    if len(d_errs) > 0: ann_lines.append(f"DESTINY        mean |err|: {d_errs.mean():.1f}% (n={len(d_errs)})")
     ax.text(0.02, 0.97, "\n".join(ann_lines), transform=ax.transAxes, fontsize=8.5, verticalalignment="top", bbox=dict(boxstyle="round,pad=0.4", facecolor="white", edgecolor="#aaaaaa", alpha=0.9))
 
     ax.grid(True, which="both", alpha=0.3); ax.legend(loc="lower right", fontsize=9); add_cap_colorbar(fig, [ax], norm)
@@ -410,6 +435,7 @@ def main():
     p.add_argument("--destiny-timeout", type=int, default=300, help="Timeout [s] per DESTINY call")
     p.add_argument("--output-dir", default="benchmark_results")
     p.add_argument("--verbose-destiny", action="store_true", help="Print DESTINY cell/cfg and full stdout on every call")
+    p.add_argument("--verbose-opt",     action="store_true", help="Print pre/post-snap parameter table for every optimized design")
     p.add_argument("--max-targets", type=int, default=None, help="Max target designs to optimize (None for all)")
     p.add_argument("--feasibility", action="store_true", help="Use feasibility classifier to penalize impossible designs")
     args = p.parse_args()
@@ -441,12 +467,16 @@ def main():
 
     df_res = _validate_top_designs(df_res, x_col, y_col, min(args.validate_top, len(df_res)), args)
 
-    s_errs, d_errs = df_res["surr_mean_abs_err_pct"].dropna(), df_res["destiny_mean_abs_err_pct"].dropna()
+    s_errs = df_res["surr_mean_abs_err_pct"].dropna()
+    post_s_errs = df_res["post_snap_surr_mean_abs_err_pct"].dropna()
+    d_errs = df_res["destiny_mean_abs_err_pct"].dropna()
     csv_path = os.path.join(args.output_dir, f"benchmark_{args.mode}_{args.tech}_{args.node}nm_{args.roadmap}.csv")
     df_res[[c for c in df_res.columns if not c.startswith("_")]].to_csv(csv_path, index=False)
     
-    print(f"[6/6] Results saved -> {csv_path}\n      Surrogate mean |err|: {s_errs.mean():.2f}%  (median {s_errs.median():.2f}%,  n={len(s_errs)})")
-    if len(d_errs) > 0: print(f"      DESTINY   mean |err|: {d_errs.mean():.2f}%  (median {d_errs.median():.2f}%,  n={len(d_errs)})")
+    print(f"[6/6] Results saved -> {csv_path}\n"
+          f"      Pre-snap Surr  mean |err|: {s_errs.mean():.2f}%  (median {s_errs.median():.2f}%,  n={len(s_errs)})\n"
+          f"      Post-snap Surr mean |err|: {post_s_errs.mean():.2f}%  (median {post_s_errs.median():.2f}%,  n={len(post_s_errs)})")
+    if len(d_errs) > 0: print(f"      DESTINY        mean |err|: {d_errs.mean():.2f}%  (median {d_errs.median():.2f}%,  n={len(d_errs)})")
 
     _plot_results(df_res, df, df_target, df_pareto_ref, x_col, y_col, x_label, y_label, args, s_errs, d_errs)
 

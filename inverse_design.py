@@ -74,8 +74,11 @@ def _build_dyn_idx(feature_cols, opt_cols):
 
 
 def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, device):
-    """Compute SRAM cell derived features and write them into feature vector x (in-place)."""
-    from destiny_utils import derive_sram_physical_params
+    """Compute SRAM cell derived features and write them into feature vector x (in-place).
+
+    CellArea is computed using differentiable torch ops so gradients flow back to
+    wn/wp/wac during optimization. 
+    """
     wn  = 10 ** log_vals[opt_cols.index("CellInput_SRAMCellNMOSWidth (F)")]
     wp  = 10 ** log_vals[opt_cols.index("CellInput_SRAMCellPMOSWidth (F)")]
     wac = 10 ** log_vals[opt_cols.index("CellInput_AccessCMOSWidth (F)")]
@@ -83,14 +86,15 @@ def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, de
         rv = log_vals[opt_cols.index("CellInput_ReadVoltage (V)")]
     else:
         rv = torch.tensor(float(fixed_context.get("CellInput_ReadVoltage (V)", 1.0)), device=device)
-    node = int([k for k in fixed_context if "process_node_nm_" in k][0].split("_")[-1])
-    p = {"SRAMCellNMOSWidth (F)": wn.item(), "SRAMCellPMOSWidth (F)": wp.item(), "AccessCMOSWidth (F)": wac.item()}
-    derive_sram_physical_params(p, node)
-    cell_area = p["CellArea (F^2)"]
+
+    # Differentiable CellArea — gradient flows back to wn, wp, wac
+    cell_area = 55.0 + 30.0 * torch.maximum(wn, wac) + 20.0 * (wp + 0.5) # Mirrors the formula in derive_sram_physical_params
+    cell_area = torch.clamp(cell_area, 40.0, 200.0) # Same clamping too
+
     if "CellInput_CellArea (F^2)" in dyn_idx:
-        x[dyn_idx["CellInput_CellArea (F^2)"]] = torch.log10(torch.tensor(cell_area, device=device))
+        x[dyn_idx["CellInput_CellArea (F^2)"]] = torch.log10(cell_area)
     if "derived_sqrt_area" in dyn_idx:
-        x[dyn_idx["derived_sqrt_area"]] = torch.sqrt(torch.tensor(cell_area, device=device))
+        x[dyn_idx["derived_sqrt_area"]] = torch.sqrt(cell_area)
     if "derived_read_v_sq" in dyn_idx:
         x[dyn_idx["derived_read_v_sq"]] = rv ** 2
 
@@ -190,7 +194,7 @@ class InverseOptimizer:
             torch.tensor(weights, dtype=torch.float32, device=self.device),
         )
 
-    def optimize(self, targets, fixed_context, steps=300, n_restarts=4, target_weights=None):
+    def optimize(self, targets, fixed_context, steps=300, n_restarts=4, target_weights=None, verbose=False):
         """Gradient-based inverse design with multi-start."""
         t_tensor, w_tensor = self._target_tensors(targets)
         if target_weights is not None:
@@ -316,10 +320,84 @@ class InverseOptimizer:
                 if k not in self.opt_cols:
                     design[k] = int(2 ** float(v)) if k == "data_stacked_die_count" else v
 
+            # Always compute pre-snap (continuous) physical values for CSV export
+            pre_snap = {}
+            for col, lv in zip(self.opt_cols, final_log_vals):
+                if col in self.log10_cols:
+                    pre_snap[col] = float(10 ** lv)
+                elif col in self.log2_cols:
+                    pre_snap[col] = float(2 ** lv)
+                else:
+                    pre_snap[col] = float(lv)
+
+            # Second forward pass using snapped values — gives the honest post-snap surrogate prediction
+            snapped_log_vals = torch.zeros(len(self.opt_cols), device=self.device)
+            for j, col in enumerate(self.opt_cols):
+                val = float(design.get(col, 0.0))
+                if col in self.log10_cols:
+                    snapped_log_vals[j] = float(np.log10(max(val, 1e-12)))
+                elif col in self.log2_cols:
+                    snapped_log_vals[j] = float(np.log2(max(val, 1)))
+                else:
+                    snapped_log_vals[j] = val
+
+            cap_log10_snap = snapped_log_vals[self.opt_cols.index("capacity_kb")]
+            cap_phys_snap  = 10 ** cap_log10_snap
+
+            x_snap = base_x.clone()
+            for col, lv in zip(self.opt_cols, snapped_log_vals):
+                if col in dyn_idx:
+                    x_snap[dyn_idx[col]] = lv
+
+            if "derived_sqrt_capacity" in dyn_idx:
+                x_snap[dyn_idx["derived_sqrt_capacity"]] = torch.sqrt(cap_phys_snap)
+
+            if "data_stacked_die_count" in self.opt_cols:
+                stk_phys_snap = 2 ** snapped_log_vals[self.opt_cols.index("data_stacked_die_count")]
+            else:
+                stk_phys_snap = torch.tensor(2 ** float(fixed_context.get("data_stacked_die_count", 0.0)), device=self.device)
+
+            if "word_width_bits" in self.opt_cols:
+                ww_phys_snap = 2 ** snapped_log_vals[self.opt_cols.index("word_width_bits")]
+            else:
+                ww_phys_snap = torch.tensor(2 ** float(fixed_context.get("word_width_bits", 6.0)), device=self.device)
+
+            if "derived_cap_per_die" in dyn_idx:
+                x_snap[dyn_idx["derived_cap_per_die"]]  = cap_phys_snap / stk_phys_snap
+            if "derived_rows_per_die" in dyn_idx:
+                x_snap[dyn_idx["derived_rows_per_die"]] = (cap_phys_snap * 1024) / (ww_phys_snap * stk_phys_snap)
+
+            if self.tech == "SRAM" and "CellInput_SRAMCellNMOSWidth (F)" in self.opt_cols:
+                _update_sram_cell_features(x_snap, dyn_idx, snapped_log_vals, self.opt_cols, fixed_context, self.device)
+
+            for rm in ["HP", "LOP", "LSTP"]:
+                col = f"device_roadmap_{rm}_x_log10_cap"
+                if col in dyn_idx:
+                    x_snap[dyn_idx[col]] = float(fixed_context.get(f"device_roadmap_{rm}", 0.0)) * cap_log10_snap
+
+            x_snap_scaled = ((x_snap - self.means) / self.stds).unsqueeze(0)
+            if self.model.has_feasibility_head:
+                pred_snap, _ = self.model.forward_with_feasibility(x_snap_scaled)
+            else:
+                pred_snap = self.model(x_snap_scaled)
+            snapped_ppa = 10 ** pred_snap.cpu().numpy()[0]
+            snapped_ppa_dict = {label: snapped_ppa[i] for i, label in enumerate(TARGET_LABELS)}
+
+            if verbose:
+                col_w = max(len(c) for c in self.opt_cols) + 2
+                print(f"\n  {'Parameter':<{col_w}}  {'Pre-snap (continuous)':>22}  {'Post-snap (physical)':>20}")
+                print(f"  {'-'*col_w}  {'':->22}  {'':->20}")
+                for col in self.opt_cols:
+                    pre  = pre_snap.get(col, float("nan"))
+                    post = design.get(col, float("nan"))
+                    changed = "  *" if abs(pre - post) > 1e-6 * (abs(pre) + 1e-12) else ""
+                    print(f"  {col:<{col_w}}  {pre:>22.6g}  {post:>20.6g}{changed}")
+                print()
+
             pred_ppa = 10 ** pred.detach().cpu().numpy()[0]
             ppa_dict = {label: pred_ppa[i] for i, label in enumerate(TARGET_LABELS)}
 
-        return design, ppa_dict
+        return design, ppa_dict, pre_snap, snapped_ppa_dict
 
 
 if __name__ == "__main__":
@@ -334,6 +412,7 @@ if __name__ == "__main__":
     p.add_argument("--temperature",    type=float, default=350.0)
     p.add_argument("--output",         default=None, help="CSV to append results to")
     p.add_argument("--feasibility",    action="store_true")
+    p.add_argument("--verbose-opt",    action="store_true", help="Print pre/post-snap parameter table")
     args = p.parse_args()
 
     targets = {k: v for k, v in [
@@ -353,7 +432,8 @@ if __name__ == "__main__":
         "temperature_K":                  args.temperature,
     }
 
-    design, ppa = InverseOptimizer(args.tech, use_feasibility=args.feasibility).optimize(targets, context)
+    design, ppa, pre_snap, snapped_ppa = InverseOptimizer(args.tech, use_feasibility=args.feasibility).optimize(
+        targets, context, verbose=args.verbose_opt)
 
     row = {"tech": args.tech, "node_nm": args.node,
            "roadmap": args.roadmap, "temperature_K": args.temperature}
@@ -363,11 +443,18 @@ if __name__ == "__main__":
         "pred_energy_nJ":  ppa.get("Energy"),  "pred_leakage_mW": ppa.get("Leakage"),
     })
     row.update({
+        "post_snap_pred_latency_ns": snapped_ppa.get("Latency"),
+        "post_snap_pred_area_mm2":   snapped_ppa.get("Area"),
+        "post_snap_pred_energy_nJ":  snapped_ppa.get("Energy"),
+        "post_snap_pred_leakage_mW": snapped_ppa.get("Leakage"),
+    })
+    row.update({
         "target_latency_ns": targets.get("cache_hit_latency_ns",  float("nan")),
         "target_area_mm2":   targets.get("cache_area_mm2",        float("nan")),
         "target_energy_nJ":  targets.get("cache_write_energy_nJ", float("nan")),
         "target_leakage_mW": targets.get("cache_leakage_mW",      float("nan")),
     })
+    row.update({f"pre_snap_{k}": v for k, v in pre_snap.items()})
 
     df_out = pd.DataFrame([row])
     if args.output:
