@@ -69,6 +69,7 @@ def _build_dyn_idx(feature_cols, opt_cols):
     dyn_keys = set(opt_cols) | {
         "derived_sqrt_capacity", "derived_cap_per_die", "derived_rows_per_die",
         "CellInput_CellArea (F^2)", "derived_sqrt_area", "derived_read_v_sq",
+        "CellInput_MinSenseVoltage (mV)", "CellInput_CellAspectRatio",
     } | {f"device_roadmap_{rm}_x_log10_cap" for rm in ["HP", "LOP", "LSTP"]}
     return {k: i for i, k in enumerate(feature_cols) if k in dyn_keys}
 
@@ -97,6 +98,21 @@ def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, de
         x[dyn_idx["derived_sqrt_area"]] = torch.sqrt(cell_area)
     if "derived_read_v_sq" in dyn_idx:
         x[dyn_idx["derived_read_v_sq"]] = rv ** 2
+
+    # Dynamically update MinSenseVoltage and AspectRatio so the model does not see out-of-distribution 0.0 values
+    if "CellInput_MinSenseVoltage (mV)" in dyn_idx:
+        a_vth = 3.0
+        for k in fixed_context:
+            if k.startswith("process_node_nm_") and float(fixed_context[k]) > 0.5:
+                node = int(k.split("_")[-1])
+                a_vth = {65: 5.0, 45: 4.0, 32: 3.0, 22: 2.5}.get(node, 3.0)
+                break
+        v_sense = 6.0 * a_vth / torch.sqrt(2.0 * wac)
+        v_sense = torch.clamp(v_sense, 5.0, 80.0)
+        x[dyn_idx["CellInput_MinSenseVoltage (mV)"]] = v_sense
+
+    if "CellInput_CellAspectRatio" in dyn_idx:
+        x[dyn_idx["CellInput_CellAspectRatio"]] = torch.tensor(1.4600, device=device)
 
 
 def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
