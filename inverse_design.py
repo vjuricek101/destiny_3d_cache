@@ -143,7 +143,7 @@ def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
 class InverseOptimizer:
     def __init__(self, tech, use_feasibility=False):
         self.tech   = tech
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu")
 
         if use_feasibility:
             model_dir = f"model_output/{tech.lower()}_feasibility"
@@ -172,34 +172,38 @@ class InverseOptimizer:
         self.means = torch.tensor(self.scaler.mean_,  dtype=torch.float32, device=self.device)
         self.stds  = torch.tensor(self.scaler.scale_, dtype=torch.float32, device=self.device)
 
-        self.opt_cols, self.opt_bounds = [], []
-        self.log10_cols, self.log2_cols, self.linear_cols = [], [], []
+        # Candidate columns — pruned per-call in optimize() based on fixed_context
+        self._all_opt_cols    = []
+        self._all_opt_bounds  = []
+        self._all_log10_cols  = []
+        self._all_log2_cols   = []
+        self._all_linear_cols = []
 
         for col, bound in zip(BASE_ARCH_COLS, BASE_ARCH_BOUNDS):
             if col in self.feature_cols:
-                self.opt_cols.append(col); self.opt_bounds.append(bound)
-                (self.log10_cols if col == "capacity_kb" else self.log2_cols).append(col)
+                self._all_opt_cols.append(col); self._all_opt_bounds.append(bound)
+                (self._all_log10_cols if col == "capacity_kb" else self._all_log2_cols).append(col)
 
         for col, bound in DATA_PARAM_BOUNDS_LOG2.items():
             if col in self.feature_cols:
-                self.opt_cols.append(col); self.opt_bounds.append(bound)
-                self.log2_cols.append(col)
+                self._all_opt_cols.append(col); self._all_opt_bounds.append(bound)
+                self._all_log2_cols.append(col)
 
         for col, bound in DATA_PARAM_BOUNDS_LINEAR.items():
             if col in self.feature_cols:
-                self.opt_cols.append(col); self.opt_bounds.append(bound)
-                self.linear_cols.append(col)
+                self._all_opt_cols.append(col); self._all_opt_bounds.append(bound)
+                self._all_linear_cols.append(col)
 
         if self.tech == "SRAM":
             for col, bound in SRAM_CELL_BOUNDS_LOG10.items():
                 if col in self.feature_cols:
-                    self.opt_cols.append(col)
-                    self.opt_bounds.append((np.log10(bound[0]), np.log10(bound[1])))
-                    self.log10_cols.append(col)
+                    self._all_opt_cols.append(col)
+                    self._all_opt_bounds.append((np.log10(bound[0]), np.log10(bound[1])))
+                    self._all_log10_cols.append(col)
             for col, bound in SRAM_CELL_BOUNDS_LINEAR.items():
                 if col in self.feature_cols:
-                    self.opt_cols.append(col); self.opt_bounds.append(bound)
-                    self.linear_cols.append(col)
+                    self._all_opt_cols.append(col); self._all_opt_bounds.append(bound)
+                    self._all_linear_cols.append(col)
 
     def _target_tensors(self, targets):
         """Return (log10 target values, binary weight mask) for the 4 PPA outputs."""
@@ -212,6 +216,15 @@ class InverseOptimizer:
 
     def optimize(self, targets, fixed_context, steps=300, n_restarts=4, target_weights=None, verbose=False):
         """Gradient-based inverse design with multi-start."""
+        # Exclude columns that are pinned by fixed_context so the optimizer
+        # cannot move them during gradient descent.
+        fixed_keys = set(fixed_context.keys())
+        self.opt_cols    = [c for c in self._all_opt_cols    if c not in fixed_keys]
+        self.opt_bounds  = [b for c, b in zip(self._all_opt_cols, self._all_opt_bounds) if c not in fixed_keys]
+        self.log10_cols  = [c for c in self._all_log10_cols  if c not in fixed_keys]
+        self.log2_cols   = [c for c in self._all_log2_cols   if c not in fixed_keys]
+        self.linear_cols = [c for c in self._all_linear_cols if c not in fixed_keys]
+
         t_tensor, w_tensor = self._target_tensors(targets)
         if target_weights is not None:
             if isinstance(target_weights, dict):
@@ -331,10 +344,10 @@ class InverseOptimizer:
                 if wn / wac < 2.0:
                     design["CellInput_SRAMCellNMOSWidth (F)"] = float(round(min(2.0 * wac, 2.5), 2))
 
-            # Add non-optimised context; decode log2-encoded stack to physical int
+            # Values already decoded to physical values in fixed_context
             for k, v in fixed_context.items():
                 if k not in self.opt_cols:
-                    design[k] = int(2 ** float(v)) if k == "data_stacked_die_count" else v
+                    design[k] = v
 
             # Always compute pre-snap (continuous) physical values for CSV export
             pre_snap = {}

@@ -359,7 +359,7 @@ def train(args, trial=None):
     train_loader = make_loader(X_train, y_train, shuffle=True)
     val_loader   = make_loader(X_val,   y_val,   shuffle=False)
 
-    device       = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device       = torch.device("cpu")
     model        = PPA_MLP(len(feats), args.hidden_dim, args.n_blocks, args.dropout).to(device)
     optimizer    = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     loss_weights = torch.tensor(args.alpha, dtype=torch.float32, device=device)
