@@ -66,15 +66,17 @@ def process_results(tech, only_full):
 
     if only_full: return
 
-    # For the Pareto frontier, use only ReadLatency rows so that target PPA values
-    # are consistent with the ReadLatency opt_target used in DESTINY validation.
-    ppa_cols = ["cache_hit_latency_ns", "cache_write_energy_nJ", "cache_area_mm2", "cache_leakage_mW"]
+    ppa_cols = [
+        "cache_area_mm2",
+        "cache_hit_latency_ns",
+        "cache_write_latency_ns",
+        "cache_refresh_latency_ns",
+        "cache_hit_energy_nJ",
+        "cache_write_energy_nJ",
+        "cache_refresh_energy_nJ",
+        "cache_leakage_mW",
+    ]
     pareto_df = full_df
-    if "opt_target" in full_df.columns:
-        rl_mask = full_df["opt_target"].str.strip() == "Read Latency"
-        if rl_mask.any():
-            pareto_df = full_df[rl_mask].copy()
-            print(f"  Pareto computed on {len(pareto_df)}/{len(full_df)} ReadLatency rows")
 
     pareto_frames = []
 
@@ -120,13 +122,8 @@ def process_feasibility(tech, output_dir="pareto"):
             if df.empty:
                 skipped += 1
                 continue
-            # Prefer the ReadLatency row; fall back to first row for new single-row CSVs
-            if "opt_target" in df.columns:
-                rl = df[df["opt_target"].str.strip() == "Read Latency"]
-                row = rl.iloc[[0]] if not rl.empty else df.iloc[[0]]
-            else:
-                row = df.iloc[[0]]
-            chunks.append(row)
+            # All OptimizationTargets kept
+            chunks.append(df)
         df_valid = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
         df_valid["is_valid"] = 1
         print(f"  Loaded {len(df_valid):>6} valid rows  ({skipped} files skipped)")

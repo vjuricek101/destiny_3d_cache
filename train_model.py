@@ -15,25 +15,44 @@ from sklearn.metrics import r2_score, mean_absolute_percentage_error, mean_squar
 
 # ── Column definitions ────────────────────────────────────────────────────────
 
-TARGET_COLS   = ["cache_hit_latency_ns", "cache_write_energy_nJ", "cache_area_mm2", "cache_leakage_mW"]
-TARGET_LABELS = ["Read Latency (ns)", "Write Energy (nJ)", "Area (mm^2)", "Leakage (mW)"]
+from destiny_utils import TARGET_COLS, TARGET_LABELS
 
 DROP_COLS = [
     # data_num_row_per_set has no DESTINY force flag; always 1 in normal-access-mode caches.
     "data_num_row_per_set",
-    "variant_name", "opt_target", "cache_access_mode", "cache_hit_energy_nJ",
-    "cache_miss_latency_ns", "cache_write_latency_ns", "cache_refresh_latency_ns",
-    "cache_miss_energy_nJ", "cache_write_energy_nJ", "cache_refresh_energy_nJ",
+    "variant_name", "opt_target", "cache_access_mode",
+    "cache_miss_latency_ns",
+    "cache_miss_energy_nJ",
     "cache_refresh_power_W", "CellInput_MemCellType", "CellInput_ProcessNode",
     "data_total_mats", "data_total_banks", "data_num_row_subarray", "data_num_col_subarray",
     "data_subarray_num_row", "data_subarray_num_col",
     "is_valid",
+    # Tag PPA sub-components — directly additive into cache targets (cache_area = data + tag),
+    "tag_bank_area_mm2",
+    "tag_read_latency_ns", "tag_write_latency_ns",
+    "tag_read_energy_pJ", "tag_write_energy_pJ",
+    "tag_leakage_mW",
+    # Tag subarray dimension outputs — same reason data equivalents are dropped.
+    "tag_num_row_subarray", "tag_num_col_subarray",
+    "tag_subarray_num_row", "tag_subarray_num_col",
 ]
 
 CATEGORICAL_COLS = [
-    "mem_cell_type", "device_roadmap", "process_node_nm", "opt_target",
+    # Technology / process (always one-hot)
+    "mem_cell_type", "device_roadmap", "process_node_nm",
+    # Cell-level categoricals
     "CellInput_AccessType", "CellInput_ReadMode", "CellInput_ResetMode",
     "CellInput_SetMode", "CellInput_ReadFloating",
+    # Data array wire configuration — string-valued outputs from DESTINY
+    "data_local_wire_type", "data_local_wire_repeater_type", "data_local_wire_low_swing",
+    "data_global_wire_type", "data_global_wire_repeater_type", "data_global_wire_low_swing",
+    # Data buffer design style (latency / balanced / area)
+    "data_area_optimization_level",
+    # Tag array wire configuration (same treatment as data wires)
+    "tag_local_wire_type", "tag_local_wire_repeater_type", "tag_local_wire_low_swing",
+    "tag_global_wire_type", "tag_global_wire_repeater_type", "tag_global_wire_low_swing",
+    # Tag buffer design style
+    "tag_area_optimization_level",
 ]
 
 FORCE_NUMERIC_COLS = ["CellInput_ResetVoltage (V)", "CellInput_SetVoltage (V)", "CellInput_ReadVoltage (V)"]
@@ -51,16 +70,24 @@ LOG_NUMERIC_COLS = [
 
 LOG2_CFG_COLS = [
     "word_width_bits", "associativity", "data_stacked_die_count",
-    "data_mux_sense_amp", "data_mux_output_lev2",
+    "data_mux_sense_amp", "data_mux_output_lev1", "data_mux_output_lev2",
     "data_num_active_mat_per_row", "data_num_active_mat_per_col",
+    # Tag array power-of-2 knobs (mirror of data equivalents)
+    "tag_num_row_mat", "tag_num_col_mat",
+    "tag_mux_sense_amp", "tag_mux_output_lev1", "tag_mux_output_lev2",
+    "tag_num_active_mat_per_row", "tag_num_active_mat_per_col",
 ]
 
 # Columns that pass through untransformed (linear scale):
 # - internal_sensing: binary (0/1), dropped for SRAM/eDRAM via TECH_DROP_COLS
-# - temperature_K, data_mux_*, data_num_active_*, data_num_row_per_set: linear numeric
+# - temperature_K, data_num_active_*: linear numeric
+# - data_mux_output_lev1 is power-of-2 - handled by LOG2_CFG_COLS
+# - wire / buffer cols are string categoricals - handled by CATEGORICAL_COLS
 LINEAR_NUMERIC_COLS = [
     "temperature_K",
     "data_num_active_subarray_per_row", "data_num_active_subarray_per_col",
+    # Tag active-subarray counts (same treatment as data equivalents)
+    "tag_num_active_subarray_per_row", "tag_num_active_subarray_per_col",
     "CellInput_ReadVoltage (V)",
 ]
 
@@ -300,38 +327,62 @@ def prepare_data(args):
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def plot_training_history(log_rows, save_path, title="PPA Training Loss History", is_tuning=False):
-    """Plot per-target loss curves. In tuning mode adds a second row showing Val Log10 MSE."""
+    """Plot per-target loss curves. In tuning mode adds a second set of rows showing Val Log10 MSE."""
     if not log_rows: return
     df = pd.DataFrame(log_rows)
-    n_rows = 2 if is_tuning else 1
-    fig, axes = plt.subplots(n_rows, 5, figsize=(24, 5*n_rows), sharey="row", squeeze=False)
-    fig.suptitle(title, fontsize=16, fontweight="bold")
-
-    labels    = TARGET_LABELS + ["Total Weighted"]
+    
+    labels     = TARGET_LABELS + ["Total Weighted"]
     train_keys = [f"train_{l}" for l in TARGET_LABELS] + ["train_loss"]
     val_huber  = [f"val_{l}"   for l in TARGET_LABELS] + ["val_loss"]
     val_mse    = [f"val_log_mse_{l}" for l in TARGET_LABELS] + ["val_log_mse_total"]
 
-    # Row 0: Train Huber vs Val Huber — shows training stability and overfitting
-    for col, (label, tk, vk) in enumerate(zip(labels, train_keys, val_huber)):
-        ax = axes[0, col]
+    n_cols = 5
+    n_rows_per_set = (len(labels) + n_cols - 1) // n_cols  # 2 rows for 9 labels
+    total_rows = n_rows_per_set * (2 if is_tuning else 1)
+    
+    fig, axes = plt.subplots(total_rows, n_cols, figsize=(24, 4 * total_rows), squeeze=False)
+    fig.suptitle(title, fontsize=16, fontweight="bold")
+
+    # Hide any unused subplots
+    for r in range(total_rows):
+        for c in range(n_cols):
+            set_idx = r // n_rows_per_set
+            r_set = r % n_rows_per_set
+            elem_idx = r_set * n_cols + c
+            if elem_idx >= len(labels):
+                axes[r, c].set_visible(False)
+
+    # Plot Huber loss (first set of rows)
+    for idx, (label, tk, vk) in enumerate(zip(labels, train_keys, val_huber)):
+        r_set = idx // n_cols
+        c = idx % n_cols
+        ax = axes[r_set, c]
         ax.plot(df["epoch"], df[tk], color="#1f77b4", lw=1.5, label="Train Huber")
         ax.plot(df["epoch"], df[vk], color="#d62728", lw=1.5, label="Val Huber", alpha=0.8)
-        ax.set(title=label, yscale="log", xlabel="Epoch", ylabel="Huber Loss")
-        ax.legend(fontsize=9); ax.grid(True, which="both", ls="--", alpha=0.4)
+        ax.set(title=label, yscale="log", xlabel="Epoch")
+        ax.legend(fontsize=9)
+        ax.grid(True, which="both", ls="--", alpha=0.4)
+        if c == 0:
+            ax.set_ylabel("Huber Loss", fontsize=11)
 
-    # Row 1 (tuning only): Val Log10 MSE — the metric actually used for early stopping and TPE
+    # Plot Log10 MSE (second set of rows, tuning only)
     if is_tuning:
-        for col, (label, mk) in enumerate(zip(labels, val_mse)):
-            ax = axes[1, col]
+        for idx, (label, mk) in enumerate(zip(labels, val_mse)):
+            r_set = idx // n_cols
+            c = idx % n_cols
+            r = n_rows_per_set + r_set
+            ax = axes[r, c]
             ax.plot(df["epoch"], df[mk], color="#2ca02c", lw=1.5, label="Val Log10 MSE")
             ax.set(title=label, yscale="log", xlabel="Epoch")
-            ax.legend(fontsize=9); ax.grid(True, which="both", ls="--", alpha=0.4)
-        axes[0, 0].set_ylabel("Huber Loss", fontsize=11)
-        axes[1, 0].set_ylabel("Log10 MSE",  fontsize=11)
+            ax.legend(fontsize=9)
+            ax.grid(True, which="both", ls="--", alpha=0.4)
+            if c == 0:
+                ax.set_ylabel("Log10 MSE", fontsize=11)
 
-    plt.tight_layout(rect=[0, 0, 1, 0.94])
-    plt.savefig(save_path, dpi=150); plt.close()
+    plt.tight_layout(rect=[0, 0, 1, 0.95])
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
 
 # ── Evaluation & artifact saving ──────────────────────────────────────────────
 
@@ -340,7 +391,7 @@ def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_ro
     model.eval()
     if getattr(args, "feasibility", False):
         # Extract only the PPA targets for evaluation
-        y_eval_ppa = y_eval[:, :4]
+        y_eval_ppa = y_eval[:, :len(TARGET_COLS)]
         with torch.no_grad():
             y_pred_log, y_pred_feas = model.forward_with_feasibility(torch.from_numpy(X_eval).to(device))
             y_pred_log = y_pred_log.cpu().numpy()
@@ -348,7 +399,7 @@ def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_ro
         y_pred, y_true = unscale_targets(y_pred_log), unscale_targets(y_eval_ppa)
         
         # Evaluate feasibility head accuracy
-        feas_acc = ((y_pred_feas > 0.5) == y_eval[:, 4:5]).mean()
+        feas_acc = ((y_pred_feas > 0.5) == y_eval[:, len(TARGET_COLS):len(TARGET_COLS)+1]).mean()
         print(f"\nFeasibility Classification Accuracy: {feas_acc * 100:.2f}%")
         
         # Save feasibility metrics
@@ -358,7 +409,7 @@ def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_ro
         # Plot Feasibility Probability Distribution and Scatter
         try:
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-            y_true_feas = y_eval[:, 4:5].flatten()
+            y_true_feas = y_eval[:, len(TARGET_COLS):len(TARGET_COLS)+1].flatten()
             y_pred_feas_flat = y_pred_feas.flatten()
             
             # Panel 1: Histogram
@@ -403,7 +454,7 @@ def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_ro
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         if getattr(args, "feasibility", False):
-            valid_mask = (y_eval[:, 4] == 1.0)
+            valid_mask = (y_eval[:, len(TARGET_COLS)] == 1.0)
             yt = y_true[valid_mask]
             yp = y_pred[valid_mask]
             ye = y_eval[valid_mask]
@@ -496,14 +547,14 @@ def train(args, trial=None):
 
         # ── Train step: Huber loss with per-target weights ──
         model.train()
-        t_loss, t_indiv = 0.0, torch.zeros(4, device=device)
+        t_loss, t_indiv = 0.0, torch.zeros(len(TARGET_COLS), device=device)
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             
             if getattr(args, "feasibility", False):
-                yb_ppa = yb[:, :4]
-                yb_feas = yb[:, 4:5]
+                yb_ppa = yb[:, :len(TARGET_COLS)]
+                yb_feas = yb[:, len(TARGET_COLS):len(TARGET_COLS)+1]
                 
                 pred_ppa, pred_feas = model.forward_with_feasibility(xb)
                 
@@ -517,7 +568,7 @@ def train(args, trial=None):
                     ppa_loss = (indiv * loss_weights).mean()
                 else:
                     ppa_loss = torch.tensor(0.0, device=device)
-                    indiv = torch.zeros(4, device=device)
+                    indiv = torch.zeros(len(TARGET_COLS), device=device)
                     
                 loss = ppa_loss + 10.0 * feas_loss # Give feasibility loss a strong weight
             else:
@@ -534,14 +585,14 @@ def train(args, trial=None):
 
         # ── Validation step: compute both Huber (for plots) and Log10 MSE (for control) ──
         model.eval()
-        v_huber, v_huber_i, v_sq = 0.0, torch.zeros(4, device=device), torch.zeros(4, device=device)
+        v_huber, v_huber_i, v_sq = 0.0, torch.zeros(len(TARGET_COLS), device=device), torch.zeros(len(TARGET_COLS), device=device)
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 
                 if getattr(args, "feasibility", False):
-                    yb_ppa = yb[:, :4]
-                    yb_feas = yb[:, 4:5]
+                    yb_ppa = yb[:, :len(TARGET_COLS)]
+                    yb_feas = yb[:, len(TARGET_COLS):len(TARGET_COLS)+1]
                     pred_ppa, pred_feas = model.forward_with_feasibility(xb)
                     
                     valid_mask = (yb_feas == 1.0).squeeze()
@@ -632,8 +683,8 @@ def parse_args(args=None):
     p.add_argument("--patience",     type=int,   default=50)
     p.add_argument("--sample-size",  type=int,   default=0,   help="Subsample N rows (0 = use all).")
     p.add_argument("--log-interval", type=int,   default=20)
-    p.add_argument("--alpha",        type=float, nargs=4, default=[1.0,1.0,1.0,1.0],
-                                     help="Per-target Huber loss weights: [Lat, Energy, Area, Leak].")
+    p.add_argument("--alpha",        type=float, nargs=8, default=[1.0]*8,
+                                     help="Per-target Huber loss weights: [Area, ReadLat, WriteLat, RefLat, ReadEn, WriteEn, RefEn, Leak].")
     p.add_argument("--from-study",   default=None, help="Load best HPs from named Optuna study.")
     p.add_argument("--eval-on-test", action="store_true", help="Final eval on test set (use once).")
     p.add_argument("--feasibility",  action="store_true", help="Train two-head model on valid+failed data.")
@@ -648,8 +699,14 @@ def load_params_from_study(args):
         print(f"\n[INFO] Loading optimized parameters from: {args.from_study}")
         for k in ["n_blocks", "lr", "weight_decay", "dropout", "hidden_dim"]:
             if k in best: setattr(args, k, best[k])
+        best_alphas = []
+        for label in TARGET_LABELS:
+            clean_label = label.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('^', '').replace('/', '_')
+            best_alphas.append(best.get(f"alpha_{clean_label}", 1.0))
         if "alpha_lat" in best:
-            args.alpha = [best.get(k, 1.0) for k in ["alpha_lat", "alpha_energy", "alpha_area", "alpha_leak"]]
+            # Legacy fallback
+            best_alphas = [best.get(k, 1.0) for k in ["alpha_lat", "alpha_energy", "alpha_area", "alpha_leak"]] + [1.0] * (len(TARGET_LABELS) - 4)
+        args.alpha = best_alphas
     except Exception as e:
         print(f"WARNING: Study '{args.from_study}' load failed: {e}")
 

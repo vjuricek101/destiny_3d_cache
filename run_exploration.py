@@ -13,7 +13,7 @@ from typing import Dict, List, Tuple
 from destiny_utils import KEEP_COLS, parse_cell_params, extract_process_node, setup_dirs
 
 # -- Configuration & Sweep Parameters ------------------------------------------
-MAX_WORKERS: int = 128
+MAX_WORKERS: int =  128
 BITLINE_LEAKAGE_TOLERANCE = 1
 
 CAPACITY_SWEEP_KB: List[int] = [2**i for i in range(1, 16)]   # 2 KB - 32 MB
@@ -127,9 +127,13 @@ def _save_failure(
     if layout_cfg is not None:
         mux_sa, mux_ol2, amc, amr, asc, asr = layout_cfg
 
-    row: dict = {
+    # Initialize all columns from KEEP_COLS to None to ensure complete alignment with successful CSVs
+    row: dict = {col: None for col in KEEP_COLS}
+
+    row.update({
         "variant_name":                     variant_name,
         "technology":                       mem_type,
+        "mem_cell_type":                    mem_type,
         "device_roadmap":                   roadmap,
         "capacity_kb":                      cap_kb,
         "word_width_bits":                  overrides.get("WordWidth (bit)"),
@@ -144,7 +148,8 @@ def _save_failure(
         "data_num_active_subarray_per_col": asc,
         "data_num_active_subarray_per_row": asr,
         "is_valid":                         0,
-    }
+    })
+
     for k, v in cell_params.items():
         try:    row[f"CellInput_{k}"] = float(v)
         except: row[f"CellInput_{k}"] = v  # noqa: E722

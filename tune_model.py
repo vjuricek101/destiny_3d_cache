@@ -33,16 +33,14 @@ def objective(trial, args):
     train_args.lr           = trial.suggest_float("lr", 5e-5, 3e-3, log=True)
     train_args.weight_decay = trial.suggest_float("weight_decay", 1e-4, 1e-1, log=True)
     train_args.dropout      = trial.suggest_float("dropout", 0.1, 0.5)
-    train_args.alpha        = [
-        trial.suggest_float("alpha_lat",    1.0, 5.0),
-        trial.suggest_float("alpha_energy", 1.0, 5.0),
-        trial.suggest_float("alpha_area",   1.0, 5.0),
-        trial.suggest_float("alpha_leak",   1.0, 5.0),
+    train_args.alpha = [
+        trial.suggest_float(f"alpha_{label.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('^', '').replace('/', '_')}", 1.0, 5.0)
+        for label in train_model.TARGET_LABELS
     ]
 
     _, _, _, metrics, _, _ = train_model.train(train_args, trial=trial)
 
-    targets = ["Read Latency (ns)", "Write Energy (nJ)", "Area (mm^2)", "Leakage (mW)"]
+    targets = train_model.TARGET_LABELS
     total   = sum(metrics[f"{t}_Log10_MSE"] for t in targets)
 
     for t in targets:

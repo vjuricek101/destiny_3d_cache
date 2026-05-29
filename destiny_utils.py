@@ -3,6 +3,83 @@ import os
 import re
 from typing import Dict, Any, List, Tuple, Optional
 
+# -- Centralized Target Definitions ---------------------------------------------
+TARGET_COLS: List[str] = [
+    "cache_area_mm2",
+    "cache_hit_latency_ns",
+    "cache_write_latency_ns",
+    "cache_refresh_latency_ns",
+    "cache_hit_energy_nJ",
+    "cache_write_energy_nJ",
+    "cache_refresh_energy_nJ",
+    "cache_leakage_mW",
+]
+
+TARGET_LABELS: List[str] = [
+    "Area (mm^2)",
+    "Read Latency (ns)",
+    "Write Latency (ns)",
+    "Refresh Latency (ns)",
+    "Read Energy (nJ)",
+    "Write Energy (nJ)",
+    "Refresh Energy (nJ)",
+    "Leakage (mW)",
+]
+
+TARGET_SHORT_LABELS: List[str] = [
+    "Area",
+    "ReadLatency",
+    "WriteLatency",
+    "RefreshLatency",
+    "ReadEnergy",
+    "WriteEnergy",
+    "RefreshEnergy",
+    "Leakage",
+]
+
+TARGET_KEY_TO_OPT_TARGET: Dict[str, str] = {
+    "cache_area_mm2":           "Area",
+    "cache_hit_latency_ns":     "ReadLatency",
+    "cache_write_latency_ns":    "WriteLatency",
+    "cache_refresh_latency_ns":  "ReadLatency",
+    "cache_hit_energy_nJ":       "ReadDynamicEnergy",
+    "cache_write_energy_nJ":     "WriteDynamicEnergy",
+    "cache_refresh_energy_nJ":   "ReadDynamicEnergy",
+    "cache_leakage_mW":         "LeakagePower",
+}
+
+METRIC_META: Dict[str, Dict[str, str]] = {
+    "cache_area_mm2":         {"label": "Area (mm2)",          "unit": "mm2"},
+    "cache_hit_latency_ns":   {"label": "Read Latency (ns)",  "unit": "ns"},
+    "cache_write_latency_ns": {"label": "Write Latency (ns)",  "unit": "ns"},
+    "cache_refresh_latency_ns": {"label": "Refresh Latency (ns)", "unit": "ns"},
+    "cache_hit_energy_nJ":    {"label": "Hit Energy (nJ)",     "unit": "nJ"},
+    "cache_write_energy_nJ":  {"label": "Write Energy (nJ)",   "unit": "nJ"},
+    "cache_refresh_energy_nJ":  {"label": "Refresh Energy (nJ)",  "unit": "nJ"},
+    "cache_leakage_mW":       {"label": "Leakage (mW)",        "unit": "mW"},
+    "cache_miss_latency_ns":  {"label": "Miss Latency (ns)",   "unit": "ns"},
+}
+
+METRIC_TO_PPA_LABEL: Dict[str, str] = {
+    "cache_area_mm2":           "Area",
+    "cache_hit_latency_ns":     "ReadLatency",
+    "cache_write_latency_ns":    "WriteLatency",
+    "cache_refresh_latency_ns":  "RefreshLatency",
+    "cache_hit_energy_nJ":       "ReadEnergy",
+    "cache_write_energy_nJ":     "WriteEnergy",
+    "cache_refresh_energy_nJ":   "RefreshEnergy",
+    "cache_leakage_mW":         "Leakage",
+}
+
+LAYOUT_COLS: List[str] = [
+    "data_mux_sense_amp",
+    "data_mux_output_lev2",
+    "data_num_active_mat_per_col",
+    "data_num_active_mat_per_row",
+    "data_num_active_subarray_per_col",
+    "data_num_active_subarray_per_row",
+]
+
 # -- Column Selection -----------------------------------------------------------
 # Columns kept in the final CSV.  Dropped columns fall into 3 categories:
 #   1. Array-level PPA (data_read_latency_ns, data_bank_area_mm2, etc.) --
@@ -40,7 +117,6 @@ KEEP_COLS: List[str] = [
     "cache_leakage_mW",
     "cache_refresh_power_W",
     # -- Structural / organizational outputs (data array only) --------------
-    # These describe HOW DESTINY organized the memory -- safe model features.
     "data_stacked_die_count",    # destiny_bank_stacked
     "data_total_banks",          # destiny_total_banks
     "data_total_mats",           # destiny_total_mats
@@ -49,12 +125,53 @@ KEEP_COLS: List[str] = [
     "data_subarray_num_row",     # destiny_subarray_rows
     "data_subarray_num_col",     # destiny_subarray_cols
     "data_mux_sense_amp",        # destiny_senseamp_mux
+    "data_mux_output_lev1",      # destiny_output_mux_l1
     "data_mux_output_lev2",      # destiny_output_mux_l2
     "data_num_active_mat_per_col",
     "data_num_active_mat_per_row",
     "data_num_active_subarray_per_col",
     "data_num_active_subarray_per_row",
     "data_num_row_per_set",
+    # -- Wire configuration (logged but DESTINY auto-selects unless forced) ---
+    "data_local_wire_type",
+    "data_local_wire_repeater_type",
+    "data_local_wire_low_swing",
+    "data_global_wire_type",
+    "data_global_wire_repeater_type",
+    "data_global_wire_low_swing",
+    # -- Buffer design optimization (BufferDesignOptimization) ----------------
+    "data_area_optimization_level",
+    # -- Tag array structural columns (source of per-opt_target variation) ----
+    # cache PPA = data + tag; the data array is forced/identical per file,
+    # so ALL inter-row differences in cache_area/leakage/latency/energy come
+    # from these tag columns being optimized differently per opt_target.
+    "tag_num_row_mat",
+    "tag_num_col_mat",
+    "tag_mux_sense_amp",
+    "tag_mux_output_lev1",
+    "tag_mux_output_lev2",
+    "tag_num_active_mat_per_col",
+    "tag_num_active_mat_per_row",
+    "tag_num_active_subarray_per_col",
+    "tag_num_active_subarray_per_row",
+    "tag_num_row_subarray",
+    "tag_num_col_subarray",
+    "tag_subarray_num_row",
+    "tag_subarray_num_col",
+    "tag_area_optimization_level",
+    "tag_local_wire_type",
+    "tag_local_wire_repeater_type",
+    "tag_local_wire_low_swing",
+    "tag_global_wire_type",
+    "tag_global_wire_repeater_type",
+    "tag_global_wire_low_swing",
+    # Tag PPA sub-components (directly additive into cache totals)
+    "tag_bank_area_mm2",
+    "tag_read_latency_ns",
+    "tag_write_latency_ns",
+    "tag_read_energy_pJ",
+    "tag_write_energy_pJ",
+    "tag_leakage_mW",
 ]
 
 # -- Utilities -----------------------------------------------------------------
@@ -140,6 +257,21 @@ def pareto_frontier_2d(x: np.ndarray, y: np.ndarray) -> np.ndarray:
         dominated[i] = np.any((x <= x[i]) & (y <= y[i]) &
                               ((x < x[i]) | (y < y[i])))
     return ~dominated
+
+def pareto_frontier_nd(costs: np.ndarray) -> np.ndarray:
+    """
+    Return boolean mask of non-dominated points for N dimensions.
+    costs is a (N_points, N_dimensions) array. Minimizing all dimensions.
+    """
+    is_efficient = np.ones(costs.shape[0], dtype=bool)
+    for i, c in enumerate(costs):
+        if is_efficient[i]:
+            # Keep any point with a lower cost
+            # A point is dominated if another point is <= in all dims and < in at least one dim.
+            dominated = np.all(costs[is_efficient] <= c, axis=1) & np.any(costs[is_efficient] < c, axis=1)
+            is_efficient[is_efficient] = ~dominated
+            is_efficient[i] = True  # Always keep self in this check
+    return is_efficient
 
 def pareto_step_line(x: np.ndarray, y: np.ndarray):
     """

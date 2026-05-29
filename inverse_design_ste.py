@@ -48,6 +48,204 @@ SRAM_CELL_BOUNDS_LINEAR = {
     "CellInput_ReadVoltage (V)": (0.5, 1.2),
 }
 
+# ── STE helpers ───────────────────────────────────────────────────────────────
+
+# Pre-built log2 lookup tensors so they can be registered as module buffers or
+# recreated cheaply.
+_LOG2_MUX_VALID = torch.log2(torch.tensor(_MUX_VALID, dtype=torch.float32))  # [0,1,2,3,4,5,6]
+_LOG2_MAT_VALID = torch.log2(torch.tensor(_MAT_VALID, dtype=torch.float32))  # [0,1,2,3,4]
+
+
+class _SnapToValidBucketFn(torch.autograd.Function):
+    """Forward: snap a scalar log2-encoded value to the closest entry in a
+    discrete valid set.  The return value is the *log2* of the snapped entry so
+    it can be used directly in downstream arithmetic.
+
+    Backward (STE proxy): pass-through identity gradient, but multiply by a
+    soft gate that decays smoothly to zero when the input drifts beyond the
+    physical bounds of the valid set.  This implements a Clipped-ReLU-style
+    proxy (Yin et al. §3) that ensures grad → 0 at infeasible boundaries.
+
+    Args
+    ----
+    ctx            : autograd context
+    x              : scalar or 1-D tensor, already in log2 space
+    log2_buckets   : 1-D tensor of log2(valid_entries), sorted ascending
+    """
+    @staticmethod
+    def forward(ctx, x, log2_buckets):
+        lo = log2_buckets[0]
+        hi = log2_buckets[-1]
+        # Store clipping bounds for backward proxy
+        ctx.save_for_backward(x, lo, hi)
+        # Find closest bucket (Euclidean distance in log2 space)
+        dists = (x - log2_buckets).abs()
+        idx   = dists.argmin()
+        return log2_buckets[idx].clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, lo, hi = ctx.saved_tensors
+        # Clipped-ReLU style gate: full pass-through within [lo, hi],
+        # zero outside.  Uses a soft sigmoid transition of width ~0.25 log2
+        # units at each boundary to keep gradient landscape smooth near edges.
+        margin = 0.25
+        gate_lo = torch.sigmoid((x - lo) / margin)
+        gate_hi = torch.sigmoid((hi - x) / margin)
+        gate    = gate_lo * gate_hi
+        return grad_output * gate, None   # no grad for log2_buckets tensor
+
+
+class _RoundIntegerFn(torch.autograd.Function):
+    """Forward: torch.round (integer quantization).
+    Backward: straight-through identity — gradient passes unchanged.
+    Optionally zero the gradient outside [lo, hi] to prevent params wandering
+    into infeasible integer territory.
+    """
+    @staticmethod
+    def forward(ctx, x, lo: float, hi: float):
+        ctx.lo = lo
+        ctx.hi = hi
+        ctx.save_for_backward(x)
+        return x.round()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, = ctx.saved_tensors
+        # Zero gradient outside physical bounds (hard clip)
+        mask = (x >= ctx.lo) & (x <= ctx.hi)
+        return grad_output * mask.float(), None, None
+
+
+class _ClippedContinuousFn(torch.autograd.Function):
+    """Forward: identity (value unchanged — continuous param).
+    Backward: Clipped-ReLU proxy — identity inside [lo, hi], zero outside.
+    This mirrors the saturating-STE strategy recommended by Yin et al. §3.2
+    for parameters that have hard physical bounds but no discretisation step.
+    """
+    @staticmethod
+    def forward(ctx, x, lo: float, hi: float):
+        ctx.lo = lo
+        ctx.hi = hi
+        ctx.save_for_backward(x)
+        # Clamp to physical range in the forward pass so downstream ops always
+        # receive a feasible value.
+        return x.clamp(lo, hi)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        x, = ctx.saved_tensors
+        mask = (x >= ctx.lo) & (x <= ctx.hi)
+        return grad_output * mask.float(), None, None
+
+
+def snap_to_valid_bucket_ste(x: torch.Tensor, log2_buckets: torch.Tensor) -> torch.Tensor:
+    """Public wrapper around _SnapToValidBucketFn.apply."""
+    log2_buckets = log2_buckets.to(x.device)
+    return _SnapToValidBucketFn.apply(x, log2_buckets)
+
+
+def round_integer_ste(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """Public wrapper around _RoundIntegerFn.apply."""
+    return _RoundIntegerFn.apply(x, lo, hi)
+
+
+def clipped_continuous_ste(x: torch.Tensor, lo: float, hi: float) -> torch.Tensor:
+    """Public wrapper around _ClippedContinuousFn.apply."""
+    return _ClippedContinuousFn.apply(x, lo, hi)
+
+
+def _apply_ste_to_log_vals(
+    log_vals:    torch.Tensor,
+    opt_cols:    list,
+    log10_cols:  list,
+    log2_cols:   list,
+    linear_cols: list,
+    opt_bounds:  list,
+    device:      torch.device,
+) -> torch.Tensor:
+    """Apply per-column STE operators to a full log_vals tensor.
+
+    Returns a new tensor of the same shape as ``log_vals`` where each element
+    has been quantised/snapped (forward) but retains a proxy gradient path
+    (backward).  The tensor is built via torch.stack so the full graph is
+    preserved.
+
+    Column dispatch:
+    ─────────────────────────────────────────────────────────────────────────
+    capacity_kb (log10_cols)
+        Power-of-2 KB snap in log10 space:
+          1. Convert log10 → log2 domain
+          2. Round to nearest integer (power-of-2 KB) with RoundIntegerSTE
+          3. Convert back to log10
+    data_mux_sense_amp / data_mux_output_lev2  (log2_cols, _MUX_VALID)
+        SnapToValidBucketSTE with _LOG2_MUX_VALID
+    data_num_active_mat_* (log2_cols, _MAT_VALID)
+        SnapToValidBucketSTE with _LOG2_MAT_VALID
+    other log2_cols (word_width_bits, associativity, data_stacked_die_count)
+        RoundIntegerSTE — integer power-of-2 in log2 space
+    DATA_PARAM_BOUNDS_LINEAR (linear_cols, integer)
+        RoundIntegerSTE with the column-specific [lo, hi]
+    SRAM_CELL_BOUNDS_LOG10 / _LINEAR (log10 / linear SRAM cell cols)
+        ClippedContinuousSTE with col-specific physical bounds
+    ─────────────────────────────────────────────────────────────────────────
+    """
+    snapped = []
+    for i, (col, lv) in enumerate(zip(opt_cols, log_vals)):
+        # ── log10-space columns ───────────────────────────────────────────
+        if col in log10_cols:
+            if col == "capacity_kb":
+                # Snap to nearest power-of-2 KB in log10 space.
+                # log10 → log2: log2_val = lv / log10(2)
+                # Round integer in log2 space → clamp [1, 15] (2 KB … 32768 KB)
+                log10_2 = float(np.log10(2))
+                lv_log2 = lv / log10_2          # still a tensor, grad flows
+                snapped_log2 = round_integer_ste(lv_log2, 1.0, 15.0)
+                snapped_lv   = snapped_log2 * log10_2
+            elif col in SRAM_CELL_BOUNDS_LOG10:
+                # log10-encoded continuous SRAM transistor width
+                lo_log10 = float(np.log10(SRAM_CELL_BOUNDS_LOG10[col][0]))
+                hi_log10 = float(np.log10(SRAM_CELL_BOUNDS_LOG10[col][1]))
+                snapped_lv = clipped_continuous_ste(lv, lo_log10, hi_log10)
+            else:
+                # Generic log10 continuous — identity with bounds from opt_bounds
+                lo, hi = opt_bounds[i]
+                snapped_lv = clipped_continuous_ste(lv, lo, hi)
+
+        # ── log2-space columns ────────────────────────────────────────────
+        elif col in log2_cols:
+            if col in ("data_mux_sense_amp", "data_mux_output_lev2"):
+                snapped_lv = snap_to_valid_bucket_ste(
+                    lv, _LOG2_MUX_VALID.to(device))
+            elif col in ("data_num_active_mat_per_row", "data_num_active_mat_per_col"):
+                snapped_lv = snap_to_valid_bucket_ste(
+                    lv, _LOG2_MAT_VALID.to(device))
+            else:
+                # word_width, associativity, stacked_die — integer powers of 2
+                lo, hi = opt_bounds[i]
+                snapped_lv = round_integer_ste(lv, lo, hi)
+
+        # ── linear-space columns ──────────────────────────────────────────
+        elif col in linear_cols:
+            if col in DATA_PARAM_BOUNDS_LINEAR:
+                lo, hi = DATA_PARAM_BOUNDS_LINEAR[col]
+                snapped_lv = round_integer_ste(lv, float(lo), float(hi))
+            elif col in SRAM_CELL_BOUNDS_LINEAR:
+                lo, hi = SRAM_CELL_BOUNDS_LINEAR[col]
+                snapped_lv = clipped_continuous_ste(lv, float(lo), float(hi))
+            else:
+                lo, hi = opt_bounds[i]
+                snapped_lv = clipped_continuous_ste(lv, float(lo), float(hi))
+
+        # ── fallback: pass through ────────────────────────────────────────
+        else:
+            snapped_lv = lv
+
+        snapped.append(snapped_lv)
+
+    return torch.stack(snapped)
+
+
 # -- Module-level helpers ------------------------------------------------------
 
 def _select_opt_target_col(targets, fixed_context):
@@ -73,7 +271,10 @@ def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, de
     """Compute SRAM cell derived features and write them into feature vector x (in-place).
 
     CellArea is computed using differentiable torch ops so gradients flow back to
-    wn/wp/wac during optimization. 
+    wn/wp/wac during optimization.
+
+    When called from the STE inner loop, log_vals is the STE-snapped tensor so
+    the cell_area computation automatically reflects the clamped transistor widths.
     """
     wn  = 10 ** log_vals[opt_cols.index("CellInput_SRAMCellNMOSWidth (F)")]
     wp  = 10 ** log_vals[opt_cols.index("CellInput_SRAMCellPMOSWidth (F)")]
@@ -210,7 +411,13 @@ class InverseOptimizer:
         )
 
     def optimize(self, targets, fixed_context, steps=300, n_restarts=4, target_weights=None, verbose=False):
-        """Gradient-based inverse design with multi-start."""
+        """Gradient-based inverse design with multi-start and per-step STE quantisation.
+
+        The STE integration ensures that the neural-network surrogate always evaluates
+        the *true quantized/snapped* feature vector during every forward pass, while
+        gradients are routed back through bounded proxy derivatives (see module
+        docstring and _apply_ste_to_log_vals for per-operator details).
+        """
         # Exclude columns that are pinned by fixed_context so the optimizer
         # cannot move them during gradient descent.
         fixed_keys = set(fixed_context.keys())
@@ -255,24 +462,45 @@ class InverseOptimizer:
 
             for _ in range(steps):
                 inner_opt.zero_grad()
-                log_vals  = params * (hi_bound - lo_bound) + lo_bound
-                cap_log10 = log_vals[self.opt_cols.index("capacity_kb")]
+
+                # ── 1. Decode continuous params to log-space values ───────────
+                log_vals = params * (hi_bound - lo_bound) + lo_bound
+
+                # ── 2. Apply STE: snap forward, proxy gradient backward ───────
+                #    log_vals_ste has the same shape as log_vals but each element
+                #    has been quantised/snapped in the forward pass.  Backward
+                #    gradients flow through the bounded proxy derivatives defined
+                #    in _apply_ste_to_log_vals.
+                log_vals_ste = _apply_ste_to_log_vals(
+                    log_vals,
+                    self.opt_cols,
+                    self.log10_cols,
+                    self.log2_cols,
+                    self.linear_cols,
+                    self.opt_bounds,
+                    self.device,
+                )
+
+                # ── 3. Build the feature vector from STE-snapped log values ───
+                #    All downstream structural derivations receive STE tensors
+                #    so gradients propagate accurately to params.
+                cap_log10 = log_vals_ste[self.opt_cols.index("capacity_kb")]
                 cap_phys  = 10 ** cap_log10
 
                 x = base_x.clone()
-                for col, lv in zip(self.opt_cols, log_vals):
+                for col, lv in zip(self.opt_cols, log_vals_ste):
                     if col in dyn_idx: x[dyn_idx[col]] = lv
 
                 if "derived_sqrt_capacity" in dyn_idx:
                     x[dyn_idx["derived_sqrt_capacity"]] = torch.sqrt(cap_phys)
 
                 if "data_stacked_die_count" in self.opt_cols:
-                    stk_phys = 2 ** log_vals[self.opt_cols.index("data_stacked_die_count")]
+                    stk_phys = 2 ** log_vals_ste[self.opt_cols.index("data_stacked_die_count")]
                 else:
                     stk_phys = torch.tensor(float(fixed_context.get("data_stacked_die_count", 1.0)), device=self.device)
 
                 if "word_width_bits" in self.opt_cols:
-                    ww_phys = 2 ** log_vals[self.opt_cols.index("word_width_bits")]
+                    ww_phys = 2 ** log_vals_ste[self.opt_cols.index("word_width_bits")]
                 else:
                     ww_phys = torch.tensor(2 ** float(fixed_context.get("word_width_bits", 6.0)), device=self.device)
 
@@ -282,7 +510,8 @@ class InverseOptimizer:
                     x[dyn_idx["derived_rows_per_die"]] = (cap_phys * 1024) / (ww_phys * stk_phys)
 
                 if self.tech == "SRAM" and "CellInput_SRAMCellNMOSWidth (F)" in self.opt_cols:
-                    _update_sram_cell_features(x, dyn_idx, log_vals, self.opt_cols, fixed_context, self.device)
+                    # Pass log_vals_ste so the SRAM cell area uses clamped transistor widths
+                    _update_sram_cell_features(x, dyn_idx, log_vals_ste, self.opt_cols, fixed_context, self.device)
 
                 for rm in ["HP", "LOP", "LSTP"]:
                     col = f"device_roadmap_{rm}_x_log10_cap"
@@ -425,7 +654,7 @@ class InverseOptimizer:
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="DESTINY Inverse Design Optimizer")
+    p = argparse.ArgumentParser(description="DESTINY Inverse Design Optimizer (STE)")
     p.add_argument("--tech",           default="SRAM")
     p.add_argument("--target-read-latency",    type=float, help="Target read latency (ns)")
     p.add_argument("--target-write-latency",   type=float, help="Target write latency (ns)")

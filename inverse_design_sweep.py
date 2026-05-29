@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Runs one configuration + produces one csv + plot"""
+
 import os, sys, argparse, subprocess, warnings, time, threading, shutil, re
 import numpy as np
 import pandas as pd
@@ -7,36 +9,23 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from inverse_design import InverseOptimizer
-from destiny_utils import pareto_frontier_2d, pareto_step_line, cap_colormap, format_log_axis, add_cap_colorbar, derive_sram_physical_params
+from destiny_utils import (
+    pareto_frontier_2d,
+    pareto_step_line,
+    cap_colormap,
+    format_log_axis,
+    add_cap_colorbar,
+    derive_sram_physical_params,
+    METRIC_META,
+    METRIC_TO_PPA_LABEL,
+    LAYOUT_COLS as _LAYOUT_COLS
+)
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # Temperature co-varies with stack count (from run_exploration.py).
 SRAM_TEMPERATURE_MAP = {1: 300, 2: 363, 4: 380}
 
-# -- Metric metadata -----------------------------------------------------------
-METRIC_META = {
-    "cache_hit_latency_ns":   {"label": "Read Latency (ns)",  "unit": "ns"},
-    "cache_area_mm2":         {"label": "Area (mm2)",          "unit": "mm2"},
-    "cache_hit_energy_nJ":    {"label": "Hit Energy (nJ)",     "unit": "nJ"},
-    "cache_leakage_mW":       {"label": "Leakage (mW)",        "unit": "mW"},
-    "cache_miss_latency_ns":  {"label": "Miss Latency (ns)",   "unit": "ns"},
-    "cache_write_latency_ns": {"label": "Write Latency (ns)",  "unit": "ns"},
-    "cache_write_energy_nJ":  {"label": "Write Energy (nJ)",   "unit": "nJ"},
-}
-
-METRIC_TO_PPA_LABEL = {
-    "cache_hit_latency_ns":  "Latency",
-    "cache_area_mm2":        "Area",
-    "cache_write_energy_nJ": "Energy",
-    "cache_leakage_mW":      "Leakage",
-}
-
-_LAYOUT_COLS = [
-    "data_mux_sense_amp", "data_mux_output_lev2",
-    "data_num_active_mat_per_col", "data_num_active_mat_per_row",
-    "data_num_active_subarray_per_col", "data_num_active_subarray_per_row",
-]
 
 # -- Target-point selection ----------------------------------------------------
 
@@ -71,7 +60,7 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
     """Generate .cell and .cfg files for DESTINY."""
     p = {"SRAMCellNMOSWidth (F)": wn, "SRAMCellPMOSWidth (F)": wp, "AccessCMOSWidth (F)": wac}
     derive_sram_physical_params(p, node)
-    
+
     cell_content = f"""-MemCellType: SRAM
 -CellArea (F^2): {p["CellArea (F^2)"]:.4f}
 -SRAMCellNMOSWidth (F): {wn:.4f}
@@ -82,7 +71,6 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
 -CellAspectRatio: 1.4600
 -ReadVoltage (V): {read_voltage:.4f}
 -Stitching: 16
--ProcessNode: {node}
 """
 
     cfg_content = f"""-OptimizationTarget: {opt_target}
@@ -96,15 +84,16 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
 -MemoryCellInputFile: {os.path.abspath(cell_file)}
 -ProcessNode: {node}
 """
-    
-    # Append forced layout parameters
-    if layout.get("mux_sa") is not None: cfg_content += f"-ForceMuxSenseAmp: {int(layout['mux_sa'])}\n"
-    if layout.get("mux_ol2") is not None: cfg_content += f"-ForceMuxOutputLev2: {int(layout['mux_ol2'])}\n"
+
+    # ── 6 backprop-solved layout / mux parameters ─────────────────────────────
+    if layout.get("mux_sa")     is not None: cfg_content += f"-ForceMuxSenseAmp: {int(layout['mux_sa'])}\n"
+    if layout.get("mux_ol2")    is not None: cfg_content += f"-ForceMuxOutputLev2: {int(layout['mux_ol2'])}\n"
     if layout.get("act_mat_col") is not None and layout.get("act_mat_row") is not None:
-        c, r = int(layout['act_mat_col']), int(layout['act_mat_row'])
+        c, r = int(layout["act_mat_col"]), int(layout["act_mat_row"])
+        # Total = Active: search space is already collapsed to this single point.
         cfg_content += f"-ForceBank (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
     if layout.get("act_sub_col") is not None and layout.get("act_sub_row") is not None:
-        c, r = int(layout['act_sub_col']), int(layout['act_sub_row'])
+        c, r = int(layout["act_sub_col"]), int(layout["act_sub_row"])
         cfg_content += f"-ForceMat (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
 
     with open(cell_file, "w") as f: f.write(cell_content)
@@ -231,8 +220,23 @@ def pct_err(predicted, target):
     return float("nan") if target == 0 else (predicted - target) / abs(target) * 100.0
 
 def _layout_from_row(row):
-    """Extract forced layout params present in a Series/dict as int, else None."""
-    return {k: int(row[k]) for k in _LAYOUT_COLS if k in row.index and pd.notna(row[k])}
+    """Map a result-row's backprop-solved layout columns to the keys expected by
+    _generate_destiny_configs / validate_and_capture.
+    """
+    mapping = {
+        "data_mux_sense_amp":               "mux_sa",
+        "data_mux_output_lev2":             "mux_ol2",
+        "data_num_active_mat_per_col":      "act_mat_col",
+        "data_num_active_mat_per_row":      "act_mat_row",
+        "data_num_active_subarray_per_col": "act_sub_col",
+        "data_num_active_subarray_per_row": "act_sub_row",
+    }
+    out = {}
+    for src, dst in mapping.items():
+        val = row[src] if src in row.index else None
+        if val is not None and not (isinstance(val, float) and np.isnan(val)):
+            out[dst] = int(val)
+    return out
 
 # -- Main Helpers --------------------------------------------------------------
 
@@ -264,7 +268,7 @@ def _run_optimization_sweep(df_target, df, opt, x_col, y_col, x_label, y_label, 
         
         ctx = row_to_context(row, args.roadmap)
         opt_ctx = {k: v for k, v in ctx.items() if not k.startswith("_")}
-        opt_ctx["data_stacked_die_count"] = 0.0 # Force 2D designs
+        opt_ctx["data_stacked_die_count"] = 1.0 # Force 2D designs
         
         design, ppa, pre_snap, snapped_ppa = opt.optimize(targets, opt_ctx, steps=args.opt_steps, verbose=args.verbose_opt)
         surr_x, surr_y = ppa.get(METRIC_TO_PPA_LABEL.get(x_col, "")), ppa.get(METRIC_TO_PPA_LABEL.get(y_col, ""))
