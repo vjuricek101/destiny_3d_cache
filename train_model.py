@@ -15,7 +15,7 @@ from sklearn.metrics import r2_score, mean_absolute_percentage_error, mean_squar
 
 # ── Column definitions ────────────────────────────────────────────────────────
 
-from destiny_utils import TARGET_COLS, TARGET_LABELS
+from destiny_utils import TARGET_COLS, TARGET_LABELS, get_active_targets, get_active_labels
 
 DROP_COLS = [
     # data_num_row_per_set has no DESTINY force flag; always 1 in normal-access-mode caches.
@@ -133,19 +133,19 @@ class ResidualBlock(nn.Module):
 
 
 class PPA_MLP(nn.Module):
-    """
-    Stack of residual blocks with a linear input projection and output head.
+    """Stack of residual blocks with a linear input projection and dual output heads.
+
+    Always outputs both PPA predictions and feasibility probability.
     Use forward_with_feasibility() for joint PPA + feasibility inference.
     """
     def __init__(self, input_dim: int, hidden_dim: int = 512, n_blocks: int = 6,
-                 dropout: float = 0.1, has_feasibility_head: bool = False):
+                 dropout: float = 0.1, n_targets: int = len(TARGET_COLS)):
         super().__init__()
-        self.input_proj           = nn.Linear(input_dim, hidden_dim)
-        self.blocks               = nn.ModuleList([ResidualBlock(hidden_dim, dropout) for _ in range(n_blocks)])
-        self.output_head          = nn.Linear(hidden_dim, len(TARGET_COLS))
-        self.has_feasibility_head = has_feasibility_head
-        if has_feasibility_head:
-            self.feasibility_head = nn.Linear(hidden_dim, 1)
+        self.input_proj   = nn.Linear(input_dim, hidden_dim)
+        self.blocks       = nn.ModuleList([ResidualBlock(hidden_dim, dropout) for _ in range(n_blocks)])
+        self.output_head  = nn.Linear(hidden_dim, n_targets)
+        self.n_targets    = n_targets
+        self.feasibility_head = nn.Linear(hidden_dim, 1)
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         """Shared backbone: input projection + all residual blocks."""
@@ -155,14 +155,12 @@ class PPA_MLP(nn.Module):
         return x
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Standard PPA-only forward — backward-compatible with all existing call sites."""
+        """PPA-only forward — backward-compatible with existing call sites."""
         return self.output_head(self._encode(x))
 
     def forward_with_feasibility(self, x: torch.Tensor):
-        """
-        Two-head forward. Returns (ppa_log10 [B,4], p_feasible [B,1]).
-        p_feasible is in (0, 1) — probability that the design is physically valid.
-        Requires has_feasibility_head=True.
+        """Two-head forward. Returns (ppa_log10 [B, n_targets], p_feasible [B, 1]).
+        p_feasible is in (0, 1) — probability the design is physically valid.
         """
         h = self._encode(x)
         return self.output_head(h), torch.sigmoid(self.feasibility_head(h))
@@ -220,9 +218,9 @@ def build_features(df, extra_drop_cols=None):
     return df.apply(pd.to_numeric, errors="coerce").fillna(0).astype(np.float32)
 
 
-def log_targets(df):
+def log_targets(df, active_cols):
     """Convert physical target values to log10 space for training."""
-    return np.log10(np.clip(df[TARGET_COLS].values.astype(np.float64), 1e-12, None)).astype(np.float32)
+    return np.log10(np.clip(df[active_cols].values.astype(np.float64), 1e-12, None)).astype(np.float32)
 
 def unscale_targets(y_log):
     """Convert log10 model outputs back to physical units."""
@@ -257,13 +255,9 @@ def prepare_data(args):
     """Load CSV, filter, feature-engineer, and return scaled 80/10/10 train/val/test matrices."""
     print("DESTINY PPA Surrogate Model Training:")
     df = pd.read_csv(args.data)
-    if not getattr(args, "feasibility", False):
-        df = df.dropna(subset=TARGET_COLS)
-        df = filter_physical_failures(df)
-    else:
-        # Keep invalid designs; failed rows may have NaN mem_cell_type.
-        if args.tech != "ALL":
-            df["mem_cell_type"] = df["mem_cell_type"].fillna(args.tech)
+    # Keep invalid designs; failed rows may have NaN mem_cell_type.
+    if args.tech != "ALL":
+        df["mem_cell_type"] = df["mem_cell_type"].fillna(args.tech)
     print(f"  Final training set size: {df.shape}")
 
     print("\nTechnology distribution:")
@@ -315,26 +309,33 @@ def prepare_data(args):
     X_val   = scaler.transform(X_all[idx_val]).astype(np.float32)
     X_test  = scaler.transform(X_all[idx_test]).astype(np.float32)
 
-    y_all = log_targets(df)
-    if getattr(args, "feasibility", False):
-        if "is_valid" not in df.columns:
-            sys.exit("ERROR: --feasibility requires an 'is_valid' column in the dataset.")
-        y_feas_all = df["is_valid"].values.astype(np.float32)
-        y_all = np.concatenate([y_all, y_feas_all[:, None]], axis=1)
+    active_cols   = get_active_targets(args.tech)
+    active_labels = get_active_labels(args.tech)
+    y_all = log_targets(df, active_cols)
+    if "is_valid" not in df.columns:
+        sys.exit("ERROR: 'is_valid' column required in the feasibility dataset.")
+    y_feas_all = df["is_valid"].values.astype(np.float32)
+    y_all = np.concatenate([y_all, y_feas_all[:, None]], axis=1)
 
-    return X_train, X_val, X_test, y_all[idx_train], y_all[idx_val], y_all[idx_test], scaler, feats
+    return X_train, X_val, X_test, y_all[idx_train], y_all[idx_val], y_all[idx_test], scaler, feats, active_cols, active_labels
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
 
 def plot_training_history(log_rows, save_path, title="PPA Training Loss History", is_tuning=False):
-    """Plot per-target loss curves. In tuning mode adds a second set of rows showing Val Log10 MSE."""
+    """Plot per-target loss curves. In tuning mode adds a second set of rows showing Val Log10 MSE.
+
+    Labels are inferred from the actual logged keys so per-tech active-target subsets
+    (e.g. 6 targets for SRAM) are handled without KeyError.
+    """
     if not log_rows: return
     df = pd.DataFrame(log_rows)
-    
-    labels     = TARGET_LABELS + ["Total Weighted"]
-    train_keys = [f"train_{l}" for l in TARGET_LABELS] + ["train_loss"]
-    val_huber  = [f"val_{l}"   for l in TARGET_LABELS] + ["val_loss"]
-    val_mse    = [f"val_log_mse_{l}" for l in TARGET_LABELS] + ["val_log_mse_total"]
+
+    # Infer active target labels from the keys that were actually logged this run.
+    active_labels = [k[len("train_"):] for k in df.columns if k.startswith("train_") and k != "train_loss"]
+    labels     = active_labels + ["Total Weighted"]
+    train_keys = [f"train_{l}" for l in active_labels] + ["train_loss"]
+    val_huber  = [f"val_{l}"   for l in active_labels] + ["val_loss"]
+    val_mse    = [f"val_log_mse_{l}" for l in active_labels] + ["val_log_mse_total"]
 
     n_cols = 5
     n_rows_per_set = (len(labels) + n_cols - 1) // n_cols  # 2 rows for 9 labels
@@ -386,81 +387,74 @@ def plot_training_history(log_rows, save_path, title="PPA Training Loss History"
 
 # ── Evaluation & artifact saving ──────────────────────────────────────────────
 
-def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_rows, set_name="val", is_tuning=False):
+def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_rows,
+                      active_cols, active_labels, set_name="val", is_tuning=False):
     """Run inference on eval set, compute metrics, save model artifacts and plots."""
     model.eval()
-    if getattr(args, "feasibility", False):
-        # Extract only the PPA targets for evaluation
-        y_eval_ppa = y_eval[:, :len(TARGET_COLS)]
-        with torch.no_grad():
-            y_pred_log, y_pred_feas = model.forward_with_feasibility(torch.from_numpy(X_eval).to(device))
-            y_pred_log = y_pred_log.cpu().numpy()
-            y_pred_feas = y_pred_feas.cpu().numpy()
-        y_pred, y_true = unscale_targets(y_pred_log), unscale_targets(y_eval_ppa)
+    n_active = len(active_cols)
+    # Extract only the active PPA targets for evaluation
+    y_eval_ppa = y_eval[:, :n_active]
+    with torch.no_grad():
+        y_pred_log, y_pred_feas = model.forward_with_feasibility(torch.from_numpy(X_eval).to(device))
+        y_pred_log = y_pred_log.cpu().numpy()
+        y_pred_feas = y_pred_feas.cpu().numpy()
+    y_pred, y_true = unscale_targets(y_pred_log), unscale_targets(y_eval_ppa)
+    
+    # Evaluate feasibility head accuracy
+    feas_acc = ((y_pred_feas > 0.5) == y_eval[:, n_active:n_active+1]).mean()
+    print(f"\nFeasibility Classification Accuracy: {feas_acc * 100:.2f}%")
+    
+    # Save feasibility metrics
+    feas_metrics = pd.DataFrame([{"Metric": "Feasibility", "Accuracy_percent": round(feas_acc * 100, 2)}])
+    feas_metrics.to_csv(os.path.join(args.output_dir, f"{set_name}_feasibility_metrics.csv"), index=False)
+    
+    # Plot Feasibility Probability Distribution and Scatter
+    try:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        y_true_feas = y_eval[:, n_active:n_active+1].flatten()
+        y_pred_feas_flat = y_pred_feas.flatten()
         
-        # Evaluate feasibility head accuracy
-        feas_acc = ((y_pred_feas > 0.5) == y_eval[:, len(TARGET_COLS):len(TARGET_COLS)+1]).mean()
-        print(f"\nFeasibility Classification Accuracy: {feas_acc * 100:.2f}%")
+        # Panel 1: Histogram
+        bins = np.linspace(0, 1, 51)
+        ax1.hist(y_pred_feas_flat[y_true_feas == 1], bins=bins, alpha=0.6, label='True Valid', color='green')
+        ax1.hist(y_pred_feas_flat[y_true_feas == 0], bins=bins, alpha=0.6, label='True Invalid', color='red')
+        ax1.axvline(x=0.5, color='black', linestyle='--')
+        ax1.set_title("Probability Distribution")
+        ax1.set_xlabel("Predicted Probability")
+        ax1.set_ylabel("Count")
+        ax1.legend()
+        ax1.grid(alpha=0.3)
         
-        # Save feasibility metrics
-        feas_metrics = pd.DataFrame([{"Metric": "Feasibility", "Accuracy_percent": round(feas_acc * 100, 2)}])
-        feas_metrics.to_csv(os.path.join(args.output_dir, f"{set_name}_feasibility_metrics.csv"), index=False)
+        # Panel 2: Shape scatter plot
+        # Plot a random subset of up to 150 points so it's not a giant unreadable blob
+        n_plot = min(len(y_true_feas), 150)
+        idx = np.random.choice(len(y_true_feas), n_plot, replace=False)
         
-        # Plot Feasibility Probability Distribution and Scatter
-        try:
-            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
-            y_true_feas = y_eval[:, len(TARGET_COLS):len(TARGET_COLS)+1].flatten()
-            y_pred_feas_flat = y_pred_feas.flatten()
-            
-            # Panel 1: Histogram
-            bins = np.linspace(0, 1, 51)
-            ax1.hist(y_pred_feas_flat[y_true_feas == 1], bins=bins, alpha=0.6, label='True Valid', color='green')
-            ax1.hist(y_pred_feas_flat[y_true_feas == 0], bins=bins, alpha=0.6, label='True Invalid', color='red')
-            ax1.axvline(x=0.5, color='black', linestyle='--')
-            ax1.set_title("Probability Distribution")
-            ax1.set_xlabel("Predicted Probability")
-            ax1.set_ylabel("Count")
-            ax1.legend()
-            ax1.grid(alpha=0.3)
-            
-            # Panel 2: Shape scatter plot
-            # Plot a random subset of up to 150 points so it's not a giant unreadable blob
-            n_plot = min(len(y_true_feas), 150)
-            idx = np.random.choice(len(y_true_feas), n_plot, replace=False)
-            
-            y_true_sub = y_true_feas[idx]
-            y_pred_class = (y_pred_feas_flat[idx] > 0.5).astype(int)
-            
-            ax2.scatter(range(n_plot), y_true_sub, marker='o', s=80, alpha=0.4, color='blue', label='Ground Truth')
-            ax2.scatter(range(n_plot), y_pred_class, marker='x', s=40, color='red', label='Predicted Class')
-            ax2.set_yticks([0, 1])
-            ax2.set_yticklabels(['Invalid (0)', 'Valid (1)'])
-            ax2.set_xlabel("Sample Index (Random Subset)")
-            ax2.set_title(f"Truth vs Prediction ({n_plot} points)")
-            ax2.legend()
-            ax2.grid(alpha=0.3)
-            
-            plt.tight_layout()
-            plt.savefig(os.path.join(args.output_dir, f"{set_name}_feasibility_dist.png"), dpi=150)
-            plt.close()
-        except Exception as e:
-            print(f"Warning: Could not plot feasibility distribution: {e}")
-            
-    else:
-        with torch.no_grad():
-            y_pred_log = model(torch.from_numpy(X_eval).to(device)).cpu().numpy()
-        y_pred, y_true = unscale_targets(y_pred_log), unscale_targets(y_eval)
+        y_true_sub = y_true_feas[idx]
+        y_pred_class = (y_pred_feas_flat[idx] > 0.5).astype(int)
+        
+        ax2.scatter(range(n_plot), y_true_sub, marker='o', s=80, alpha=0.4, color='blue', label='Ground Truth')
+        ax2.scatter(range(n_plot), y_pred_class, marker='x', s=40, color='red', label='Predicted Class')
+        ax2.set_yticks([0, 1])
+        ax2.set_yticklabels(['Invalid (0)', 'Valid (1)'])
+        ax2.set_xlabel("Sample Index (Random Subset)")
+        ax2.set_title(f"Truth vs Prediction ({n_plot} points)")
+        ax2.legend()
+        ax2.grid(alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(os.path.join(args.output_dir, f"{set_name}_feasibility_dist.png"), dpi=150)
+        plt.close()
+    except Exception as e:
+        print(f"Warning: Could not plot feasibility distribution: {e}")
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        if getattr(args, "feasibility", False):
-            valid_mask = (y_eval[:, len(TARGET_COLS)] == 1.0)
-            yt = y_true[valid_mask]
-            yp = y_pred[valid_mask]
-            ye = y_eval[valid_mask]
-            ypl = y_pred_log[valid_mask]
-        else:
-            yt, yp, ye, ypl = y_true, y_pred, y_eval, y_pred_log
+        valid_mask = (y_eval[:, n_active] == 1.0)
+        yt = y_true[valid_mask]
+        yp = y_pred[valid_mask]
+        ye = y_eval[valid_mask]
+        ypl = y_pred_log[valid_mask]
             
         metrics_rows = [
             {
@@ -474,7 +468,7 @@ def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_ro
                 "True_Min": yt[:,i].min() if len(yt) else 0.0, "True_Max": yt[:,i].max() if len(yt) else 0.0,
                 "Pred_Min": yp[:,i].min() if len(yp) else 0.0, "Pred_Max": yp[:,i].max() if len(yp) else 0.0,
             }
-            for i, label in enumerate(TARGET_LABELS)
+            for i, label in enumerate(active_labels)
         ]
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -501,8 +495,8 @@ def save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_ro
                           f"{m['Metric']}_Log10_MSE": m["Log10_MSE"]}
 
     return (model, scaler, feats, final_metrics,
-            {l: y_true[:,i] for i,l in enumerate(TARGET_LABELS)},
-            {l: y_pred[:,i] for i,l in enumerate(TARGET_LABELS)})
+            {l: y_true[:,i] for i,l in enumerate(active_labels)},
+            {l: y_pred[:,i] for i,l in enumerate(active_labels)})
 
 # ── Main training loop ────────────────────────────────────────────────────────
 
@@ -510,7 +504,7 @@ def train(args, trial=None):
     torch.set_num_threads(24)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    X_train, X_val, X_test, y_train, y_val, y_test, scaler, feats = prepare_data(args)
+    X_train, X_val, X_test, y_train, y_val, y_test, scaler, feats, active_cols, active_labels = prepare_data(args)
 
     def make_loader(X, y, shuffle):
         return DataLoader(TensorDataset(torch.from_numpy(X), torch.from_numpy(y)),
@@ -520,12 +514,13 @@ def train(args, trial=None):
     val_loader   = make_loader(X_val,   y_val,   shuffle=False)
 
     device       = torch.device("cpu")
+    n_targets    = len(active_cols)
     model        = PPA_MLP(len(feats), args.hidden_dim, args.n_blocks, args.dropout,
-                           has_feasibility_head=getattr(args, "feasibility", False)).to(device)
+                           n_targets=n_targets).to(device)
     optimizer    = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    loss_weights = torch.tensor(args.alpha, dtype=torch.float32, device=device)
+    loss_weights = torch.tensor(args.alpha[:n_targets], dtype=torch.float32, device=device)
     criterion    = nn.HuberLoss(delta=0.5, reduction="none")  # per-element, weighted below
-    feas_criterion = nn.BCELoss() if getattr(args, "feasibility", False) else None
+    feas_criterion = nn.BCELoss()
 
     # Cosine annealing with linear warmup — stabilises early training
     warmup    = 5
@@ -535,8 +530,7 @@ def train(args, trial=None):
     ))
 
     print(f"Device: {device} | Params: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
-    if getattr(args, "feasibility", False):
-        print(f"Mode: Two-Head (PPA + Feasibility)")
+    print(f"Mode: Two-Head (PPA + Feasibility)")
     print(f"\nTraining up to {args.epochs} epochs (patience={args.patience}) ...")
     print(f"{'Epoch':>6}  {'Train(Huber)':>14}  {'Val Log10MSE':>14}  {'LR':>10}")
     print("-" * 50)
@@ -547,33 +541,29 @@ def train(args, trial=None):
 
         # ── Train step: Huber loss with per-target weights ──
         model.train()
-        t_loss, t_indiv = 0.0, torch.zeros(len(TARGET_COLS), device=device)
+        t_loss, t_indiv = 0.0, torch.zeros(n_targets, device=device)
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
             
-            if getattr(args, "feasibility", False):
-                yb_ppa = yb[:, :len(TARGET_COLS)]
-                yb_feas = yb[:, len(TARGET_COLS):len(TARGET_COLS)+1]
-                
-                pred_ppa, pred_feas = model.forward_with_feasibility(xb)
-                
-                # Feasibility loss
-                feas_loss = feas_criterion(pred_feas, yb_feas)
-                
-                # PPA loss (only on valid designs)
-                valid_mask = (yb_feas == 1.0).squeeze()
-                if valid_mask.any():
-                    indiv = criterion(pred_ppa[valid_mask], yb_ppa[valid_mask]).mean(dim=0)
-                    ppa_loss = (indiv * loss_weights).mean()
-                else:
-                    ppa_loss = torch.tensor(0.0, device=device)
-                    indiv = torch.zeros(len(TARGET_COLS), device=device)
-                    
-                loss = ppa_loss + 10.0 * feas_loss # Give feasibility loss a strong weight
+            yb_ppa = yb[:, :n_targets]
+            yb_feas = yb[:, n_targets:n_targets+1]
+            
+            pred_ppa, pred_feas = model.forward_with_feasibility(xb)
+            
+            # Feasibility loss
+            feas_loss = feas_criterion(pred_feas, yb_feas)
+            
+            # PPA loss (only on valid designs)
+            valid_mask = (yb_feas == 1.0).squeeze()
+            if valid_mask.any():
+                indiv = criterion(pred_ppa[valid_mask], yb_ppa[valid_mask]).mean(dim=0)
+                ppa_loss = (indiv * loss_weights).mean()
             else:
-                indiv = criterion(model(xb), yb).mean(dim=0)   # per-target mean Huber
-                loss  = (indiv * loss_weights).mean()           # weighted scalar
+                ppa_loss = torch.tensor(0.0, device=device)
+                indiv = torch.zeros(n_targets, device=device)
+                
+            loss = ppa_loss + 10.0 * feas_loss # Give feasibility loss a strong weight
                 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # prevent exploding grads
@@ -585,28 +575,21 @@ def train(args, trial=None):
 
         # ── Validation step: compute both Huber (for plots) and Log10 MSE (for control) ──
         model.eval()
-        v_huber, v_huber_i, v_sq = 0.0, torch.zeros(len(TARGET_COLS), device=device), torch.zeros(len(TARGET_COLS), device=device)
+        v_huber, v_huber_i, v_sq = 0.0, torch.zeros(n_targets, device=device), torch.zeros(n_targets, device=device)
         with torch.no_grad():
             for xb, yb in val_loader:
                 xb, yb = xb.to(device), yb.to(device)
                 
-                if getattr(args, "feasibility", False):
-                    yb_ppa = yb[:, :len(TARGET_COLS)]
-                    yb_feas = yb[:, len(TARGET_COLS):len(TARGET_COLS)+1]
-                    pred_ppa, pred_feas = model.forward_with_feasibility(xb)
-                    
-                    valid_mask = (yb_feas == 1.0).squeeze()
-                    if valid_mask.any():
-                        indiv = criterion(pred_ppa[valid_mask], yb_ppa[valid_mask]).mean(dim=0)
-                        v_huber   += (indiv * loss_weights).mean().item() * valid_mask.sum().item()
-                        v_huber_i += indiv * valid_mask.sum().item()
-                        v_sq      += ((pred_ppa[valid_mask] - yb_ppa[valid_mask]) ** 2).sum(dim=0)
-                else:
-                    pred   = model(xb)
-                    indiv  = criterion(pred, yb).mean(dim=0)
-                    v_huber   += (indiv * loss_weights).mean().item() * len(xb)
-                    v_huber_i += indiv * len(xb)
-                    v_sq      += ((pred - yb) ** 2).sum(dim=0)  # accumulate squared errors in log10 space
+                yb_ppa = yb[:, :n_targets]
+                yb_feas = yb[:, n_targets:n_targets+1]
+                pred_ppa, pred_feas = model.forward_with_feasibility(xb)
+                
+                valid_mask = (yb_feas == 1.0).squeeze()
+                if valid_mask.any():
+                    indiv = criterion(pred_ppa[valid_mask], yb_ppa[valid_mask]).mean(dim=0)
+                    v_huber   += (indiv * loss_weights).mean().item() * valid_mask.sum().item()
+                    v_huber_i += indiv * valid_mask.sum().item()
+                    v_sq      += ((pred_ppa[valid_mask] - yb_ppa[valid_mask]) ** 2).sum(dim=0)
 
         # For feasibility, average over valid samples only (approximate here using len(X_val) for simplicity)
 
@@ -626,7 +609,7 @@ def train(args, trial=None):
         # Log both Huber and Log10 MSE so plots can show either
         row = {"epoch": epoch, "train_loss": train_loss, "val_loss": val_huber_loss,
                "val_log_mse_total": val_log_mse_total, "lr": current_lr}
-        for i, l in enumerate(TARGET_LABELS):
+        for i, l in enumerate(active_labels):
             row[f"train_{l}"]       = train_indiv[i]
             row[f"val_{l}"]         = val_huber_i[i]
             row[f"val_log_mse_{l}"] = val_log_mse[i]
@@ -654,6 +637,7 @@ def train(args, trial=None):
     X_eval   = X_test  if args.eval_on_test else X_val
     y_eval   = y_test  if args.eval_on_test else y_val
     return save_and_evaluate(model, X_eval, y_eval, device, args, scaler, feats, log_rows,
+                             active_cols, active_labels,
                              set_name=set_name, is_tuning=(trial is not None))
 
 # ── Inference helper ──────────────────────────────────────────────────────────
@@ -683,11 +667,11 @@ def parse_args(args=None):
     p.add_argument("--patience",     type=int,   default=50)
     p.add_argument("--sample-size",  type=int,   default=0,   help="Subsample N rows (0 = use all).")
     p.add_argument("--log-interval", type=int,   default=20)
-    p.add_argument("--alpha",        type=float, nargs=8, default=[1.0]*8,
-                                     help="Per-target Huber loss weights: [Area, ReadLat, WriteLat, RefLat, ReadEn, WriteEn, RefEn, Leak].")
+    p.add_argument("--alpha",        type=float, nargs="+", default=[1.0]*8,
+                                     help="Per-target Huber loss weights (order matches get_active_targets(tech))."
+                                          " Excess values are silently truncated; missing values default to 1.0.")
     p.add_argument("--from-study",   default=None, help="Load best HPs from named Optuna study.")
     p.add_argument("--eval-on-test", action="store_true", help="Final eval on test set (use once).")
-    p.add_argument("--feasibility",  action="store_true", help="Train two-head model on valid+failed data.")
     return p.parse_args(args)
 
 
@@ -715,17 +699,10 @@ if __name__ == "__main__":
     args = parse_args()
     load_params_from_study(args)
 
-    if args.feasibility:
-        args.data = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
-    else:
-        args.data = (f"pareto/{args.tech}/{args.tech}_full_data.csv"
-                     if args.tech != "ALL" else "pareto/full_data.csv")
+    args.data = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
 
     if args.output_dir == "model_output":
-        if args.feasibility:
-            args.output_dir = os.path.join("model_output", f"{args.tech.lower()}_feasibility")
-        else:
-            args.output_dir = os.path.join("model_output", f"{args.tech.lower()}_full_with_data_params")
+        args.output_dir = os.path.join("model_output", f"{args.tech.lower()}_feasibility")
 
     if not os.path.exists(args.data):
         sys.exit(f"ERROR: Training data not found: {args.data}")

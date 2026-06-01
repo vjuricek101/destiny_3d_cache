@@ -6,6 +6,8 @@ import numpy as np
 from pathlib import Path
 from glob import glob
 
+from destiny_utils import get_active_targets
+
 # -- Pareto Algorithm ----------------------------------------------------------
 
 def is_pareto_efficient(costs):
@@ -66,16 +68,8 @@ def process_results(tech, only_full):
 
     if only_full: return
 
-    ppa_cols = [
-        "cache_area_mm2",
-        "cache_hit_latency_ns",
-        "cache_write_latency_ns",
-        "cache_refresh_latency_ns",
-        "cache_hit_energy_nJ",
-        "cache_write_energy_nJ",
-        "cache_refresh_energy_nJ",
-        "cache_leakage_mW",
-    ]
+    # Pareto dominance uses only targets that are physically meaningful for this tech.
+    ppa_cols = get_active_targets(tech)
     pareto_df = full_df
 
     pareto_frames = []

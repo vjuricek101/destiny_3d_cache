@@ -48,6 +48,30 @@ TARGET_KEY_TO_OPT_TARGET: Dict[str, str] = {
     "cache_leakage_mW":         "LeakagePower",
 }
 
+# Exclude targets that are zero for a given technology (e.g. SRAM refresh)
+TECH_SKIP_TARGETS: Dict[str, List[str]] = {
+    "SRAM":  ["cache_refresh_latency_ns", "cache_refresh_energy_nJ"],
+    "RRAM":  [],
+    "eDRAM": [],
+}
+
+def get_active_targets(tech: str) -> List[str]:
+    """Return TARGET_COLS with tech-specific structural-zero columns removed."""
+    skip = set(TECH_SKIP_TARGETS.get(tech, []))
+    return [c for c in TARGET_COLS if c not in skip]
+
+
+def get_active_labels(tech: str) -> List[str]:
+    """TARGET_LABELS filtered to the same active subset as get_active_targets()."""
+    skip = set(TECH_SKIP_TARGETS.get(tech, []))
+    return [lbl for col, lbl in zip(TARGET_COLS, TARGET_LABELS) if col not in skip]
+
+
+def get_active_short_labels(tech: str) -> List[str]:
+    """TARGET_SHORT_LABELS filtered to the same active subset."""
+    skip = set(TECH_SKIP_TARGETS.get(tech, []))
+    return [lbl for col, lbl in zip(TARGET_COLS, TARGET_SHORT_LABELS) if col not in skip]
+
 METRIC_META: Dict[str, Dict[str, str]] = {
     "cache_area_mm2":         {"label": "Area (mm2)",          "unit": "mm2"},
     "cache_hit_latency_ns":   {"label": "Read Latency (ns)",  "unit": "ns"},
@@ -219,10 +243,14 @@ plt.rcParams.update({
 })
 
 METRICS = [
-    ("cache_hit_latency_ns",   "Read Latency",  "log"),
-    ("cache_write_energy_nJ",  "Write Energy",  "log"),
-    ("cache_area_mm2",         "Area",          "log"),
-    ("cache_leakage_mW",       "Leakage Power", "log"),
+    ("cache_hit_latency_ns",     "Read Latency (ns)",    "log"),
+    ("cache_write_latency_ns",   "Write Latency (ns)",   "log"),
+    ("cache_refresh_latency_ns", "Refresh Latency (ns)", "log"),
+    ("cache_hit_energy_nJ",      "Read Energy (nJ)",     "log"),
+    ("cache_write_energy_nJ",    "Write Energy (nJ)",    "log"),
+    ("cache_refresh_energy_nJ",  "Refresh Energy (nJ)",  "log"),
+    ("cache_leakage_mW",         "Leakage (mW)",         "log"),
+    ("cache_area_mm2",           "Area (mm^2)",          "log"),
 ]
 LAT_COL   = "cache_hit_latency_ns"
 CAP_COL   = "capacity_kb"

@@ -10,7 +10,7 @@ from destiny_utils import (
     TARGET_COLS as TARGET_KEYS,
     TARGET_LABELS,
     TARGET_SHORT_LABELS,
-    TARGET_KEY_TO_OPT_TARGET
+    get_active_targets,
 )
 
 # Architectural bounds (log10 for capacity, log2 for everything else)
@@ -24,13 +24,23 @@ BASE_ARCH_COLS = ["capacity_kb", "word_width_bits", "associativity", "data_stack
 
 DATA_PARAM_BOUNDS_LOG2 = {
     "data_mux_sense_amp":           (0, 6),
+    "data_mux_output_lev1":         (0, 6),
     "data_mux_output_lev2":         (0, 6),
     "data_num_active_mat_per_row":  (0, 4),
     "data_num_active_mat_per_col":  (0, 4),
+    "tag_num_row_mat":              (0, 6),
+    "tag_num_col_mat":              (0, 6),
+    "tag_mux_sense_amp":            (0, 6),
+    "tag_mux_output_lev1":          (0, 6),
+    "tag_mux_output_lev2":          (0, 6),
+    "tag_num_active_mat_per_row":   (0, 6),
+    "tag_num_active_mat_per_col":   (0, 6),
 }
 DATA_PARAM_BOUNDS_LINEAR = {
     "data_num_active_subarray_per_row": (1, 2),
     "data_num_active_subarray_per_col": (1, 2),
+    "tag_num_active_subarray_per_row":  (1, 2),
+    "tag_num_active_subarray_per_col":  (1, 2),
 }
 
 _MUX_VALID = [1, 2, 4, 8, 16, 32, 64]
@@ -49,15 +59,6 @@ SRAM_CELL_BOUNDS_LINEAR = {
 }
 
 # -- Module-level helpers ------------------------------------------------------
-
-def _select_opt_target_col(targets, fixed_context):
-    """Return the opt_target one-hot column name matching the primary target metric."""
-    explicit = fixed_context.get("_opt_target")
-    if explicit:
-        return f"opt_target_{explicit}"
-    primary = next(iter(targets.keys()), "cache_hit_latency_ns")
-    return f"opt_target_{TARGET_KEY_TO_OPT_TARGET.get(primary, 'Read Latency')}"
-
 
 def _build_dyn_idx(feature_cols, opt_cols):
     """Index of all columns updated per gradient step."""
@@ -122,9 +123,9 @@ def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
                 design[col] = 10 ** lv
         elif col in log2_cols:
             raw = int(2 ** round(lv))
-            if col in ("data_mux_sense_amp", "data_mux_output_lev2"):
+            if "mux_" in col:
                 design[col] = _nearest_valid(raw, _MUX_VALID)
-            elif col in ("data_num_active_mat_per_row", "data_num_active_mat_per_col"):
+            elif "_mat_" in col or "num_row_mat" in col or "num_col_mat" in col:
                 design[col] = _nearest_valid(raw, _MAT_VALID)
             else:
                 design[col] = raw
@@ -133,19 +134,69 @@ def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
     return design
 
 
+def _rows_per_subarray_penalty(log_vals, opt_cols, cap_log10, ww_log2):
+    """Differentiable physics penalty enforcing the data-array rows-per-subarray identity.
+
+    DESTINY requires (BankWithoutHtree.cpp:113, BankWithHtree.cpp:381):
+        rows_per_subarray = (cap_bytes * 8) / (assoc * wordWidth * numActiveMatPerCol * numActiveSubarrayPerCol)
+
+    In log2-space this is:
+        log2_rps = log2(cap_bits) - log2(assoc) - log2(ww) - log2(nmac_col) - log2(nsac_col)
+
+    Two soft sub-penalties are summed (caller applies a scalar weight):
+        relu(-log2_rps)                               -- negativity: not enough rows
+        (log2_rps - round(log2_rps).detach())^2      -- divisibility: non-integer log2
+
+    Parameters
+    ----------
+    log_vals  : 1-D Tensor of mapped optimizer values (log10/log2/linear per column type)
+    opt_cols  : list[str] in the same order as log_vals
+    cap_log10 : scalar Tensor, log10(capacity_kb)
+    ww_log2   : scalar Tensor, log2(word_width_bits)
+    """
+    # cap_bits = cap_kb * 8192 = cap_kb * 2^13
+    # log2(cap_bits) = log2(cap_kb) + 13 = cap_log10 * log2(10) + 13
+    LOG2_10 = 3.321928094887362
+    log2_cap_bits = cap_log10 * LOG2_10 + 13.0
+
+    def _get_log2(col, default_log2=0.0):
+        """Return the log2-space entry for a log2-encoded column, else a scalar constant."""
+        if col in opt_cols:
+            return log_vals[opt_cols.index(col)]
+        # Produce a zero-gradient constant on the same device as cap_log10
+        return cap_log10.new_zeros(1).squeeze() + default_log2
+
+    log2_assoc   = _get_log2("associativity", 2.0)           # default: log2(4)
+    log2_nac_col = _get_log2("data_num_active_mat_per_col", 0.0)  # log2 space, default: log2(1)
+
+    # data_num_active_subarray_per_col lives in LINEAR space [1, 2]; convert to log2
+    if "data_num_active_subarray_per_col" in opt_cols:
+        nsac_lin  = log_vals[opt_cols.index("data_num_active_subarray_per_col")]
+        log2_nsac = torch.log2(nsac_lin.clamp(min=1.0))
+    else:
+        log2_nsac = cap_log10.new_zeros(1).squeeze()  # log2(1) = 0
+
+    log2_rps = log2_cap_bits - log2_assoc - ww_log2 - log2_nac_col - log2_nsac
+
+    # Penalty 1: rows_per_subarray must be >= 1
+    neg_penalty = torch.relu(-log2_rps)
+
+    # Penalty 2: log2(rows) must be a non-negative integer (power of two)
+    # Detach the rounded value so gradient flows through log2_rps, not through round()
+    frac = log2_rps - torch.round(log2_rps.detach())
+    int_penalty = frac ** 2
+
+    return neg_penalty + int_penalty
+
+
 # -- Optimizer -----------------------------------------------------------------
 
 class InverseOptimizer:
-    def __init__(self, tech, use_feasibility=False):
+    def __init__(self, tech):
         self.tech   = tech
         self.device = torch.device("cpu")
 
-        if use_feasibility:
-            model_dir = f"model_output/{tech.lower()}_feasibility"
-        else:
-            model_dir = f"model_output/{tech.lower()}_full_with_data_params"
-            if not os.path.exists(model_dir):
-                model_dir = f"model_output/{tech.lower()}_full"
+        model_dir = f"model_output/{tech.lower()}_feasibility"
         if not os.path.exists(model_dir):
             print(f"WARNING: {model_dir} not found, trying default 'model_output'")
             model_dir = "model_output"
@@ -158,11 +209,14 @@ class InverseOptimizer:
         sd       = torch.load(os.path.join(model_dir, "model.pt"), map_location=self.device)
         hidden   = sd["input_proj.weight"].shape[0]
         n_blocks = max(int(k.split(".")[1]) for k in sd if k.startswith("blocks.")) + 1
-        has_feas = "feasibility_head.weight" in sd
+        n_targets = sd["output_head.weight"].shape[0]   # e.g. 6 for SRAM, 8 for eDRAM
         self.model = PPA_MLP(len(self.feature_cols), hidden_dim=hidden,
-                             n_blocks=n_blocks, has_feasibility_head=has_feas).to(self.device)
+                             n_blocks=n_blocks, n_targets=n_targets).to(self.device)
         self.model.load_state_dict(sd)
         self.model.eval()
+
+        # Length of the model output head and the target/weight tensors
+        self._active_keys = get_active_targets(self.tech)
 
         self.means = torch.tensor(self.scaler.mean_,  dtype=torch.float32, device=self.device)
         self.stds  = torch.tensor(self.scaler.scale_, dtype=torch.float32, device=self.device)
@@ -201,9 +255,13 @@ class InverseOptimizer:
                     self._all_linear_cols.append(col)
 
     def _target_tensors(self, targets):
-        """Return (log10 target values, binary weight mask) for the 4 PPA outputs."""
-        vals    = [targets.get(k, 1.0) for k in TARGET_KEYS]
-        weights = [1.0 if k in targets else 0.0 for k in TARGET_KEYS]
+        """Return (log10 target values, binary weight mask) aligned to the model output head.
+
+        Uses self._active_keys — the same ordered subset of TARGET_KEYS the model was
+        trained on — so tensor length matches the checkpoint's output_head shape exactly.
+        """
+        vals    = [targets.get(k, 1.0) for k in self._active_keys]
+        weights = [1.0 if k in targets else 0.0 for k in self._active_keys]
         return (
             torch.tensor(np.log10(np.clip(vals, 1e-12, None)), dtype=torch.float32, device=self.device),
             torch.tensor(weights, dtype=torch.float32, device=self.device),
@@ -237,10 +295,7 @@ class InverseOptimizer:
             if c not in dyn_idx:
                 base_x[i] = float(fixed_context.get(c, 0.0))
 
-        # Condition on opt_target matching the primary target metric
-        for i, c in enumerate(self.feature_cols):
-            if c.startswith("opt_target_"):
-                base_x[i] = 1.0 if c == _select_opt_target_col(targets, fixed_context) else 0.0
+
 
         lo_bound = torch.tensor([b[0] for b in self.opt_bounds], device=self.device)
         hi_bound = torch.tensor([b[1] for b in self.opt_bounds], device=self.device)
@@ -272,9 +327,12 @@ class InverseOptimizer:
                     stk_phys = torch.tensor(float(fixed_context.get("data_stacked_die_count", 1.0)), device=self.device)
 
                 if "word_width_bits" in self.opt_cols:
-                    ww_phys = 2 ** log_vals[self.opt_cols.index("word_width_bits")]
+                    ww_log2 = log_vals[self.opt_cols.index("word_width_bits")]
+                    ww_phys = 2 ** ww_log2
                 else:
-                    ww_phys = torch.tensor(2 ** float(fixed_context.get("word_width_bits", 6.0)), device=self.device)
+                    # word_width_bits pinned in fixed_context as its log2 value
+                    ww_log2 = torch.tensor(float(fixed_context.get("word_width_bits", 6.0)), device=self.device)
+                    ww_phys = 2 ** ww_log2
 
                 if "derived_cap_per_die"  in dyn_idx:
                     x[dyn_idx["derived_cap_per_die"]]  = cap_phys / stk_phys
@@ -290,14 +348,12 @@ class InverseOptimizer:
                         x[dyn_idx[col]] = float(fixed_context.get(f"device_roadmap_{rm}", 0.0)) * cap_log10
 
                 x_scaled = ((x - self.means) / self.stds).unsqueeze(0)
-                if self.model.has_feasibility_head:
-                    pred, p_feas    = self.model.forward_with_feasibility(x_scaled)
-                    learned_penalty = 50.0 * (1.0 - p_feas.squeeze())
-                else:
-                    pred            = self.model(x_scaled)
-                    learned_penalty = 0.0
+                pred, p_feas    = self.model.forward_with_feasibility(x_scaled)
+                learned_penalty = 50.0 * (1.0 - p_feas.squeeze())
+                # Physics: penalise designs where rows_per_subarray is not a positive power-of-two
+                physics_penalty = 5.0 * _rows_per_subarray_penalty(log_vals, self.opt_cols, cap_log10, ww_log2)
 
-                loss    = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty
+                loss    = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty + physics_penalty
                 barrier = (torch.relu(-params) ** 2).sum() + (torch.relu(params - 1.0) ** 2).sum()
                 (loss + 100.0 * barrier).backward()
 
@@ -400,12 +456,10 @@ class InverseOptimizer:
                     x_snap[dyn_idx[col]] = float(fixed_context.get(f"device_roadmap_{rm}", 0.0)) * cap_log10_snap
 
             x_snap_scaled = ((x_snap - self.means) / self.stds).unsqueeze(0)
-            if self.model.has_feasibility_head:
-                pred_snap, _ = self.model.forward_with_feasibility(x_snap_scaled)
-            else:
-                pred_snap = self.model(x_snap_scaled)
+            pred_snap, _ = self.model.forward_with_feasibility(x_snap_scaled)
             snapped_ppa = 10 ** pred_snap.cpu().numpy()[0]
-            snapped_ppa_dict = {label: snapped_ppa[i] for i, label in enumerate(TARGET_LABELS)}
+            active_short = [TARGET_SHORT_LABELS[TARGET_KEYS.index(k)] for k in self._active_keys]
+            snapped_ppa_dict = {label: snapped_ppa[i] for i, label in enumerate(active_short)}
 
             if verbose:
                 col_w = max(len(c) for c in self.opt_cols) + 2
@@ -419,7 +473,7 @@ class InverseOptimizer:
                 print()
 
             pred_ppa = 10 ** pred.detach().cpu().numpy()[0]
-            ppa_dict = {label: pred_ppa[i] for i, label in enumerate(TARGET_LABELS)}
+            ppa_dict = {label: pred_ppa[i] for i, label in enumerate(active_short)}
 
         return design, ppa_dict, pre_snap, snapped_ppa_dict
 
@@ -435,14 +489,10 @@ if __name__ == "__main__":
     p.add_argument("--target-write-energy",    type=float, help="Target write energy (nJ)")
     p.add_argument("--target-refresh-energy",  type=float, help="Target refresh energy (nJ)")
     p.add_argument("--target-leakage",         type=float, help="Target leakage power (mW)")
-    # Keep legacy names for CLI backward compatibility:
-    p.add_argument("--target-latency", type=float, help="Target read latency (ns) [Legacy]")
-    p.add_argument("--target-energy",  type=float, help="Target write energy (nJ) [Legacy]")
     p.add_argument("--node",           type=int, default=32, choices=[22, 32, 45, 65])
     p.add_argument("--roadmap",        default="HP", choices=["HP", "LOP", "LSTP"])
     p.add_argument("--temperature",    type=float, default=350.0)
     p.add_argument("--output",         default=None, help="CSV to append results to")
-    p.add_argument("--feasibility",    action="store_true")
     p.add_argument("--verbose-opt",    action="store_true", help="Print pre/post-snap parameter table")
     args = p.parse_args()
 
@@ -466,17 +516,17 @@ if __name__ == "__main__":
         "temperature_K":                  args.temperature,
     }
 
-    design, ppa, pre_snap, snapped_ppa = InverseOptimizer(args.tech, use_feasibility=args.feasibility).optimize(
+    design, ppa, pre_snap, snapped_ppa = InverseOptimizer(args.tech).optimize(
         targets, context, verbose=args.verbose_opt)
 
     row = {"tech": args.tech, "node_nm": args.node,
            "roadmap": args.roadmap, "temperature_K": args.temperature}
     row.update(design)
     row.update({
-        f"pred_{k}": ppa.get(label) for k, label in zip(TARGET_KEYS, TARGET_LABELS)
+        f"pred_{k}": ppa.get(label) for k, label in zip(TARGET_KEYS, TARGET_SHORT_LABELS)
     })
     row.update({
-        f"post_snap_pred_{k}": snapped_ppa.get(label) for k, label in zip(TARGET_KEYS, TARGET_LABELS)
+        f"post_snap_pred_{k}": snapped_ppa.get(label) for k, label in zip(TARGET_KEYS, TARGET_SHORT_LABELS)
     })
     row.update({
         f"target_{k}": targets.get(k, float("nan")) for k in TARGET_KEYS

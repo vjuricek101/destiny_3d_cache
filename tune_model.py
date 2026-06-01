@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, sys, argparse, optuna, train_model
+from destiny_utils import get_active_labels
 
 def parse_args():
     p = argparse.ArgumentParser(description="Tune DESTINY PPA surrogate model hyperparameters")
@@ -9,18 +10,13 @@ def parse_args():
     p.add_argument("--epochs",      type=int,   default=300)
     p.add_argument("--patience",    type=int,   default=50)
     p.add_argument("--study-name",  default="destiny_tune")
-    p.add_argument("--feasibility", action="store_true", help="Tune two-head model on valid+failed data.")
     return p.parse_args()
 
 def objective(trial, args):
     # Base training arguments
     train_args = train_model.parse_args(args=[])
     train_args.tech        = args.tech
-    train_args.feasibility = args.feasibility
-    if args.feasibility:
-        train_args.data = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
-    else:
-        train_args.data = f"pareto/{args.tech}/{args.tech}_full_data.csv"
+    train_args.data        = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
     train_args.sample_size = args.sample_size
     train_args.epochs      = args.epochs
     train_args.patience    = args.patience
@@ -35,12 +31,12 @@ def objective(trial, args):
     train_args.dropout      = trial.suggest_float("dropout", 0.1, 0.5)
     train_args.alpha = [
         trial.suggest_float(f"alpha_{label.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('^', '').replace('/', '_')}", 1.0, 5.0)
-        for label in train_model.TARGET_LABELS
+        for label in get_active_labels(args.tech)
     ]
 
     _, _, _, metrics, _, _ = train_model.train(train_args, trial=trial)
 
-    targets = train_model.TARGET_LABELS
+    targets = get_active_labels(args.tech)
     total   = sum(metrics[f"{t}_Log10_MSE"] for t in targets)
 
     for t in targets:
@@ -51,11 +47,7 @@ def objective(trial, args):
 if __name__ == "__main__":
     args = parse_args()
     
-    if args.feasibility:
-        data_path = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
-    else:
-        data_path = f"pareto/{args.tech}/{args.tech}_full_data.csv"
-    
+    data_path = f"pareto/{args.tech}/{args.tech}_feasibility.csv"
     if not os.path.exists(data_path):
         sys.exit(f"ERROR: Data not found: {data_path}")
 

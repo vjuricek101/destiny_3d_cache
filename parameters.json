@@ -1,0 +1,423 @@
+[
+  {
+    "name": "ProcessNode",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-ProcessNode",
+    "description": "Hardware fabrication node"
+  },
+  {
+    "name": "MemCellType",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-MemCellType",
+    "description": "Memory technology family"
+  },
+  {
+    "name": "CellArea (F^2)",
+    "type": "derived",
+    "forceable": false,
+    "description": "Physical cell area"
+  },
+  {
+    "name": "SRAMCellNMOSWidth (F)",
+    "type": "swept",
+    "forceable": false,
+    "description": "NMOS transistor width"
+  },
+  {
+    "name": "SRAMCellPMOSWidth (F)",
+    "type": "swept",
+    "forceable": false,
+    "description": "PMOS transistor width"
+  },
+  {
+    "name": "AccessCMOSWidth (F)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Access transistor width"
+  },
+  {
+    "name": "CellAspectRatio",
+    "type": "swept",
+    "forceable": false,
+    "description": "Cell aspect ratio"
+  },
+  {
+    "name": "ReadVoltage (V)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Read operating voltage"
+  },
+  {
+    "name": "MinSenseVoltage (mV)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Minimum sense voltage"
+  },
+  {
+    "name": "ResistanceOnAtSetVoltage (ohm)",
+    "type": "swept",
+    "forceable": false,
+    "description": "LRS set resistance"
+  },
+  {
+    "name": "ResistanceOffAtSetVoltage (ohm)",
+    "type": "swept",
+    "forceable": false,
+    "description": "HRS set resistance"
+  },
+  {
+    "name": "ResetVoltage (V)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Reset programming voltage"
+  },
+  {
+    "name": "SetVoltage (V)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Set programming voltage"
+  },
+  {
+    "name": "ResetPulse (ns)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Reset pulse duration"
+  },
+  {
+    "name": "VoltageDropAccessDevice (V)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Access device drop"
+  },
+  {
+    "name": "AccessType",
+    "type": "swept",
+    "forceable": false,
+    "description": "RRAM access configuration"
+  },
+  {
+    "name": "DRAMCellCapacitance (F)",
+    "type": "swept",
+    "forceable": false,
+    "description": "Cell capacitor size"
+  },
+  {
+    "name": "RetentionTime (us)",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-RetentionTime (us)",
+    "description": "Time between refreshes"
+  },
+  {
+    "name": "ResistanceOnAtResetVoltage (ohm)",
+    "type": "derived",
+    "forceable": false,
+    "description": "LRS reset resistance"
+  },
+  {
+    "name": "ResistanceOnAtReadVoltage (ohm)",
+    "type": "derived",
+    "forceable": false,
+    "description": "LRS read resistance"
+  },
+  {
+    "name": "ResistanceOnAtHalfResetVoltage (ohm)",
+    "type": "derived",
+    "forceable": false,
+    "description": "LRS half-reset resistance"
+  },
+  {
+    "name": "ResistanceOffAtResetVoltage (ohm)",
+    "type": "derived",
+    "forceable": false,
+    "description": "HRS reset resistance"
+  },
+  {
+    "name": "ResistanceOffAtReadVoltage (ohm)",
+    "type": "derived",
+    "forceable": false,
+    "description": "HRS read resistance"
+  },
+  {
+    "name": "SetPulse (ns)",
+    "type": "derived",
+    "forceable": false,
+    "description": "Set pulse duration"
+  },
+  {
+    "name": "capacity_kb",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-Capacity (KB)",
+    "description": "Total memory capacity"
+  },
+  {
+    "name": "word_width_bits",
+    "type": "derived",
+    "forceable": true,
+    "force_command": "-WordWidth (bit)",
+    "description": "Selected word width"
+  },
+  {
+    "name": "associativity",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-Associativity (for cache only)",
+    "description": "Fixed cache associativity"
+  },
+  {
+    "name": "data_stacked_die_count",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-StackedDieCount",
+    "description": "Stacked die layers"
+  },
+  {
+    "name": "temperature_K",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-Temperature (K)",
+    "description": "Array operating temperature"
+  },
+  {
+    "name": "device_roadmap",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-DeviceRoadmap",
+    "description": "Device roadmap target"
+  },
+  {
+    "name": "internal_sensing",
+    "type": "derived",
+    "forceable": true,
+    "force_command": "-InternalSensing",
+    "description": "Internal sensing setting"
+  },
+  {
+    "name": "opt_target",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-OptimizationTarget",
+    "description": "Optimization target metric"
+  },
+  {
+    "name": "enable_pruning",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-EnablePruning",
+    "description": "Layout search pruning"
+  },
+  {
+    "name": "data_mux_sense_amp",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-ForceMuxSenseAmp",
+    "description": "Sense amp multiplexer"
+  },
+  {
+    "name": "data_mux_output_lev2",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-ForceMuxOutputLev2",
+    "description": "Output driver multiplexer"
+  },
+  {
+    "name": "data_num_active_mat_per_col",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-ForceBank",
+    "description": "Bank grid columns"
+  },
+  {
+    "name": "data_num_active_mat_per_row",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-ForceBank",
+    "description": "Bank grid rows"
+  },
+  {
+    "name": "data_num_active_subarray_per_col",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-ForceMat",
+    "description": "Mat grid columns"
+  },
+  {
+    "name": "data_num_active_subarray_per_row",
+    "type": "swept",
+    "forceable": true,
+    "force_command": "-ForceMat",
+    "description": "Mat grid rows"
+  },
+  {
+    "name": "data_local_wire_type",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-LocalWireType",
+    "description": "Local wire type"
+  },
+  {
+    "name": "data_local_wire_repeater_type",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-LocalWireRepeaterType",
+    "description": "Local wire repeater"
+  },
+  {
+    "name": "data_local_wire_low_swing",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-LocalWireUseLowSwing",
+    "description": "Local wire swing"
+  },
+  {
+    "name": "data_global_wire_type",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-GlobalWireType",
+    "description": "Global wire type"
+  },
+  {
+    "name": "data_global_wire_repeater_type",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-GlobalWireRepeaterType",
+    "description": "Global wire repeater"
+  },
+  {
+    "name": "data_global_wire_low_swing",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-GlobalWireUseLowSwing",
+    "description": "Global wire swing"
+  },
+  {
+    "name": "data_area_optimization_level",
+    "type": "static",
+    "forceable": true,
+    "force_command": "-BufferDesignOptimization",
+    "description": "Buffer design optimization"
+  },
+  {
+    "name": "tag_local_wire_type",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag local wire"
+  },
+  {
+    "name": "tag_local_wire_repeater_type",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag local repeater"
+  },
+  {
+    "name": "tag_local_wire_low_swing",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag local swing"
+  },
+  {
+    "name": "tag_global_wire_type",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag global wire"
+  },
+  {
+    "name": "tag_global_wire_repeater_type",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag global repeater"
+  },
+  {
+    "name": "tag_global_wire_low_swing",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag global swing"
+  },
+  {
+    "name": "tag_area_optimization_level",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag buffer design"
+  },
+  {
+    "name": "tag_num_row_mat",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag mat rows"
+  },
+  {
+    "name": "tag_num_col_mat",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag mat columns"
+  },
+  {
+    "name": "tag_mux_sense_amp",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag sense amp mux"
+  },
+  {
+    "name": "tag_mux_output_lev1",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag level 1 mux"
+  },
+  {
+    "name": "tag_mux_output_lev2",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag level 2 mux"
+  },
+  {
+    "name": "tag_num_active_mat_per_col",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag bank columns"
+  },
+  {
+    "name": "tag_num_active_mat_per_row",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag bank rows"
+  },
+  {
+    "name": "tag_num_active_subarray_per_col",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag mat columns"
+  },
+  {
+    "name": "tag_num_active_subarray_per_row",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag mat rows"
+  },
+  {
+    "name": "tag_num_row_subarray",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag subarray rows"
+  },
+  {
+    "name": "tag_num_col_subarray",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag subarray columns"
+  },
+  {
+    "name": "tag_subarray_num_row",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag subarray height"
+  },
+  {
+    "name": "tag_subarray_num_col",
+    "type": "derived",
+    "forceable": false,
+    "description": "Tag subarray width"
+  }
+]
