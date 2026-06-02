@@ -364,7 +364,7 @@ int nvsim(ofstream& outputFile, string inputFileName, long long& numSolution, Re
 		int numOffsetBit = (int)(log2(inputParameter->wordWidth / 8) + 0.1);
 		INITIAL_BASIC_WIRE;
 		/* Simulate tag */
-		BIGFOR {
+		BIGFOR_TAG {
             tech->SetLayerCount(inputParameter, stackedDieCount);
 			blockSize = TOTAL_ADDRESS_BIT - numIndexBit - numOffsetBit;
 			blockSize += 2;		/* add dirty bits and valid bits */
@@ -393,7 +393,7 @@ int nvsim(ofstream& outputFile, string inputFileName, long long& numSolution, Re
 			Bank * trialBank;
 			Result tempResult;
 			/* refine local wire type */
-			REFINE_LOCAL_WIRE_FORLOOP {
+			REFINE_TAG_LOCAL_WIRE_FORLOOP {
 				localWire->Initialize(inputParameter->processNode, (WireType)localWireType,
 						(WireRepeaterType)localWireRepeaterType, inputParameter->temperature,
 						(bool)isLocalWireLowSwing);
@@ -403,7 +403,7 @@ int nvsim(ofstream& outputFile, string inputFileName, long long& numSolution, Re
 				}
 			}
 			/* refine global wire type */
-			REFINE_GLOBAL_WIRE_FORLOOP {
+			REFINE_TAG_GLOBAL_WIRE_FORLOOP {
 				globalWire->Initialize(inputParameter->processNode, (WireType)globalWireType,
 						(WireRepeaterType)globalWireRepeaterType, inputParameter->temperature,
 						(bool)isGlobalWireLowSwing);

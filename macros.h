@@ -56,6 +56,18 @@
 	for (isGlobalWireLowSwing = inputParameter->minIsGlobalWireLowSwing; isGlobalWireLowSwing <= inputParameter->maxIsGlobalWireLowSwing; isGlobalWireLowSwing++) \
 	if ((WireRepeaterType)globalWireRepeaterType == repeated_none || (bool)isGlobalWireLowSwing == false)
 
+#define REFINE_TAG_LOCAL_WIRE_FORLOOP \
+	for (localWireType = inputParameter->minTagLocalWireType; localWireType <= inputParameter->maxTagLocalWireType; localWireType++) \
+	for (localWireRepeaterType = inputParameter->minTagLocalWireRepeaterType; localWireRepeaterType <= inputParameter->maxTagLocalWireRepeaterType; localWireRepeaterType++) \
+	for (isLocalWireLowSwing = inputParameter->minTagIsLocalWireLowSwing; isLocalWireLowSwing <= inputParameter->maxTagIsLocalWireLowSwing; isLocalWireLowSwing++) \
+	if ((WireRepeaterType)localWireRepeaterType == repeated_none || (bool)isLocalWireLowSwing == false)
+
+#define REFINE_TAG_GLOBAL_WIRE_FORLOOP \
+	for (globalWireType = inputParameter->minTagGlobalWireType; globalWireType <= inputParameter->maxTagGlobalWireType; globalWireType++) \
+	for (globalWireRepeaterType = inputParameter->minTagGlobalWireRepeaterType; globalWireRepeaterType <= inputParameter->maxTagGlobalWireRepeaterType; globalWireRepeaterType++) \
+	for (isGlobalWireLowSwing = inputParameter->minTagIsGlobalWireLowSwing; isGlobalWireLowSwing <= inputParameter->maxTagIsGlobalWireLowSwing; isGlobalWireLowSwing++) \
+	if ((WireRepeaterType)globalWireRepeaterType == repeated_none || (bool)isGlobalWireLowSwing == false)
+
 
 
 
@@ -107,6 +119,24 @@
 	for (muxOutputLev2 = inputParameter->minMuxOutputLev2; muxOutputLev2 <= inputParameter->maxMuxOutputLev2; muxOutputLev2 *= 2) \
 	for (numRowPerSet = inputParameter->minNumRowPerSet; numRowPerSet <= MIN(inputParameter->maxNumRowPerSet, inputParameter->associativity); numRowPerSet *= 2) \
 	for (areaOptimizationLevel = inputParameter->minAreaOptimizationLevel; areaOptimizationLevel <= inputParameter->maxAreaOptimizationLevel; areaOptimizationLevel++)
+
+
+#define BIGFOR_TAG \
+	for (numRowMat = inputParameter->minTagNumRowMat; numRowMat <= inputParameter->maxTagNumRowMat; numRowMat *= 2) \
+	for (numColumnMat = inputParameter->minTagNumColumnMat; numColumnMat <= inputParameter->maxTagNumColumnMat; numColumnMat *= 2) \
+    for (stackedDieCount = inputParameter->minStackLayer; stackedDieCount <= inputParameter->maxStackLayer; stackedDieCount *= 2) \
+	for (numActiveMatPerRow = MIN(numColumnMat, inputParameter->minTagNumActiveMatPerRow); numActiveMatPerRow <= MIN(numColumnMat, inputParameter->maxTagNumActiveMatPerRow); numActiveMatPerRow *= 2) \
+	for (numActiveMatPerColumn = MIN(numRowMat, inputParameter->minTagNumActiveMatPerColumn); numActiveMatPerColumn <= MIN(numRowMat, inputParameter->maxTagNumActiveMatPerColumn); numActiveMatPerColumn *= 2) \
+	for (numRowSubarray = inputParameter->minTagNumRowSubarray; numRowSubarray <= inputParameter->maxTagNumRowSubarray; numRowSubarray *= 2) \
+	for (numColumnSubarray = inputParameter->minTagNumColumnSubarray; numColumnSubarray <= inputParameter->maxTagNumColumnSubarray; numColumnSubarray *= 2) \
+	for (numActiveSubarrayPerRow = MIN(numColumnSubarray, inputParameter->minTagNumActiveSubarrayPerRow); numActiveSubarrayPerRow <= MIN(numColumnSubarray, inputParameter->maxTagNumActiveSubarrayPerRow); numActiveSubarrayPerRow *=2) \
+	for (numActiveSubarrayPerColumn = MIN(numRowSubarray, inputParameter->minTagNumActiveSubarrayPerColumn); numActiveSubarrayPerColumn <= MIN(numRowSubarray, inputParameter->maxTagNumActiveSubarrayPerColumn); numActiveSubarrayPerColumn *= 2) \
+	for (muxSenseAmp = inputParameter->minTagMuxSenseAmp; muxSenseAmp <= inputParameter->maxTagMuxSenseAmp; muxSenseAmp *= 2) \
+	for (muxOutputLev1 = inputParameter->minTagMuxOutputLev1; muxOutputLev1 <= inputParameter->maxTagMuxOutputLev1; muxOutputLev1 *= 2) \
+	for (muxOutputLev2 = inputParameter->minTagMuxOutputLev2; muxOutputLev2 <= inputParameter->maxTagMuxOutputLev2; muxOutputLev2 *= 2) \
+	for (numRowPerSet = inputParameter->minNumRowPerSet; numRowPerSet <= MIN(inputParameter->maxNumRowPerSet, inputParameter->associativity); numRowPerSet *= 2) \
+	for (areaOptimizationLevel = inputParameter->minTagAreaOptimizationLevel; areaOptimizationLevel <= inputParameter->maxTagAreaOptimizationLevel; areaOptimizationLevel++)
+
 
 
 
@@ -294,10 +324,34 @@
 	inputParameter->maxMuxOutputLev1 = 256; \
 	inputParameter->minMuxOutputLev2 = 1; \
 	inputParameter->maxMuxOutputLev2 = 256; \
+	inputParameter->minTagNumRowMat = 1; \
+	inputParameter->maxTagNumRowMat = 64; \
+	inputParameter->minTagNumColumnMat = 1; \
+	inputParameter->maxTagNumColumnMat = 64; \
+	inputParameter->minTagNumActiveMatPerRow = 1; \
+	inputParameter->maxTagNumActiveMatPerRow = 64; \
+	inputParameter->minTagNumActiveMatPerColumn = 1; \
+	inputParameter->maxTagNumActiveMatPerColumn = 64; \
+	inputParameter->minTagNumRowSubarray = 1; \
+	inputParameter->maxTagNumRowSubarray = 2; \
+	inputParameter->minTagNumColumnSubarray = 1; \
+	inputParameter->maxTagNumColumnSubarray = 2; \
+	inputParameter->minTagNumActiveSubarrayPerRow = 1; \
+	inputParameter->maxTagNumActiveSubarrayPerRow = 2; \
+	inputParameter->minTagNumActiveSubarrayPerColumn = 1; \
+	inputParameter->maxTagNumActiveSubarrayPerColumn = 2; \
+	inputParameter->minTagMuxSenseAmp = 1; \
+	inputParameter->maxTagMuxSenseAmp = 64; \
+	inputParameter->minTagMuxOutputLev1 = 1; \
+	inputParameter->maxTagMuxOutputLev1 = 64; \
+	inputParameter->minTagMuxOutputLev2 = 1; \
+	inputParameter->maxTagMuxOutputLev2 = 64; \
 	inputParameter->minNumRowPerSet = 1; \
 	inputParameter->maxNumRowPerSet = inputParameter->associativity; \
 	inputParameter->minAreaOptimizationLevel = latency_first; \
 	inputParameter->maxAreaOptimizationLevel = area_first; \
+	inputParameter->minTagAreaOptimizationLevel = latency_first; \
+	inputParameter->maxTagAreaOptimizationLevel = area_first; \
 	inputParameter->minLocalWireType = local_aggressive; \
 	inputParameter->maxLocalWireType = semi_conservative; \
 	inputParameter->minGlobalWireType = semi_aggressive; \
@@ -310,6 +364,18 @@
 	inputParameter->maxIsLocalWireLowSwing = true; \
 	inputParameter->minIsGlobalWireLowSwing = false; \
 	inputParameter->maxIsGlobalWireLowSwing = true; \
+	inputParameter->minTagLocalWireType = local_aggressive; \
+	inputParameter->maxTagLocalWireType = semi_conservative; \
+	inputParameter->minTagGlobalWireType = semi_aggressive; \
+	inputParameter->maxTagGlobalWireType = global_conservative; \
+	inputParameter->minTagLocalWireRepeaterType = repeated_none; \
+	inputParameter->maxTagLocalWireRepeaterType = repeated_50; \
+	inputParameter->minTagGlobalWireRepeaterType = repeated_none; \
+	inputParameter->maxTagGlobalWireRepeaterType = repeated_50; \
+	inputParameter->minTagIsLocalWireLowSwing = false; \
+	inputParameter->maxTagIsLocalWireLowSwing = true; \
+	inputParameter->minTagIsGlobalWireLowSwing = false; \
+	inputParameter->maxTagIsGlobalWireLowSwing = true; \
 }
 
 

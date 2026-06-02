@@ -378,6 +378,140 @@ void InputParameter::ReadInputParameterFromFile(const std::string & inputFile) {
 			continue;
 		}
 
+		if (!strncmp("-TagLocalWireType", line, strlen("-TagLocalWireType"))) {
+			sscanf(line, "-TagLocalWireType: %s", tmp);
+			if (!strcmp(tmp, "LocalAggressive")) {
+				minTagLocalWireType = local_aggressive;
+				maxTagLocalWireType = local_aggressive;
+			} else if (!strcmp(tmp, "LocalConservative")) {
+				minTagLocalWireType = local_conservative;
+				maxTagLocalWireType = local_conservative;
+			} else if (!strcmp(tmp, "SemiAggressive")) {
+				minTagLocalWireType = semi_aggressive;
+				maxTagLocalWireType = semi_aggressive;
+			} else if (!strcmp(tmp, "SemiConservative")) {
+				minTagLocalWireType = semi_conservative;
+				maxTagLocalWireType = semi_conservative;
+			} else if (!strcmp(tmp, "GlobalAggressive")) {
+				minTagLocalWireType = global_aggressive;
+				maxTagLocalWireType = global_aggressive;
+			} else if (!strcmp(tmp, "GlobalConservative")) {
+				minTagLocalWireType = global_conservative;
+				maxTagLocalWireType = global_conservative;
+			} else {	/* no supported yet */
+				minTagLocalWireType = dram_wordline;
+				maxTagLocalWireType = dram_wordline;
+			}
+			continue;
+		}
+		if (!strncmp("-TagLocalWireRepeaterType", line, strlen("-TagLocalWireRepeaterType"))) {
+			sscanf(line, "-TagLocalWireRepeaterType: %s", tmp);
+			if (!strcmp(tmp, "RepeatedOpt")) {
+				minTagLocalWireRepeaterType = repeated_opt;
+				maxTagLocalWireRepeaterType = repeated_opt;
+			} else if (!strcmp(tmp, "Repeated5%Penalty")) {
+				minTagLocalWireRepeaterType = repeated_5;
+				maxTagLocalWireRepeaterType = repeated_5;
+			} else if (!strcmp(tmp, "Repeated10%Penalty")) {
+				minTagLocalWireRepeaterType = repeated_10;
+				maxTagLocalWireRepeaterType = repeated_10;
+			} else if (!strcmp(tmp, "Repeated20%Penalty")) {
+				minTagLocalWireRepeaterType = repeated_20;
+				maxTagLocalWireRepeaterType = repeated_20;
+			} else if (!strcmp(tmp, "Repeated30%Penalty")) {
+				minTagLocalWireRepeaterType = repeated_30;
+				maxTagLocalWireRepeaterType = repeated_30;
+			} else if (!strcmp(tmp, "Repeated40%Penalty")) {
+				minTagLocalWireRepeaterType = repeated_40;
+				maxTagLocalWireRepeaterType = repeated_40;
+			} else if (!strcmp(tmp, "Repeated50%Penalty")) {
+				minTagLocalWireRepeaterType = repeated_50;
+				maxTagLocalWireRepeaterType = repeated_50;
+			} else {
+				minTagLocalWireRepeaterType = repeated_none;
+				maxTagLocalWireRepeaterType = repeated_none;
+			}
+			continue;
+		}
+		if (!strncmp("-TagLocalWireUseLowSwing", line, strlen("-TagLocalWireUseLowSwing"))) {
+			sscanf(line, "-TagLocalWireUseLowSwing: %s", tmp);
+			if (!strcmp(tmp, "Yes")) {
+				minTagIsLocalWireLowSwing = 1;
+				maxTagIsLocalWireLowSwing = 1;
+			} else {
+				minTagIsLocalWireLowSwing = 0;
+				maxTagIsLocalWireLowSwing = 0;
+			}
+			continue;
+		}
+
+		if (!strncmp("-TagGlobalWireType", line, strlen("-TagGlobalWireType"))) {
+			sscanf(line, "-TagGlobalWireType: %s", tmp);
+			if (!strcmp(tmp, "LocalAggressive")) {
+				minTagGlobalWireType = local_aggressive;
+				maxTagGlobalWireType = local_aggressive;
+			} else if (!strcmp(tmp, "LocalConservative")) {
+				minTagGlobalWireType = local_conservative;
+				maxTagGlobalWireType = local_conservative;
+			} else if (!strcmp(tmp, "SemiAggressive")) {
+				minTagGlobalWireType = semi_aggressive;
+				maxTagGlobalWireType = semi_aggressive;
+			} else if (!strcmp(tmp, "SemiConservative")) {
+				minTagGlobalWireType = semi_conservative;
+				maxTagGlobalWireType = semi_conservative;
+			} else if (!strcmp(tmp, "GlobalAggressive")) {
+				minTagGlobalWireType = global_aggressive;
+				maxTagGlobalWireType = global_aggressive;
+			} else if (!strcmp(tmp, "GlobalConservative")) {
+				minTagGlobalWireType = global_conservative;
+				maxTagGlobalWireType = global_conservative;
+			} else {	/* no supported yet */
+				minTagGlobalWireType = dram_wordline;
+				maxTagGlobalWireType = dram_wordline;
+			}
+			continue;
+		}
+		if (!strncmp("-TagGlobalWireRepeaterType", line, strlen("-TagGlobalWireRepeaterType"))) {
+			sscanf(line, "-TagGlobalWireRepeaterType: %s", tmp);
+			if (!strcmp(tmp, "RepeatedOpt")) {
+				minTagGlobalWireRepeaterType = repeated_opt;
+				maxTagGlobalWireRepeaterType = repeated_opt;
+			} else if (!strcmp(tmp, "Repeated5%Penalty")) {
+				minTagGlobalWireRepeaterType = repeated_5;
+				maxTagGlobalWireRepeaterType = repeated_5;
+			} else if (!strcmp(tmp, "Repeated10%Penalty")) {
+				minTagGlobalWireRepeaterType = repeated_10;
+				maxTagGlobalWireRepeaterType = repeated_10;
+			} else if (!strcmp(tmp, "Repeated20%Penalty")) {
+				minTagGlobalWireRepeaterType = repeated_20;
+				maxTagGlobalWireRepeaterType = repeated_20;
+			} else if (!strcmp(tmp, "Repeated30%Penalty")) {
+				minTagGlobalWireRepeaterType = repeated_30;
+				maxTagGlobalWireRepeaterType = repeated_30;
+			} else if (!strcmp(tmp, "Repeated40%Penalty")) {
+				minTagGlobalWireRepeaterType = repeated_40;
+				maxTagGlobalWireRepeaterType = repeated_40;
+			} else if (!strcmp(tmp, "Repeated50%Penalty")) {
+				minTagGlobalWireRepeaterType = repeated_50;
+				maxTagGlobalWireRepeaterType = repeated_50;
+			} else {
+				minTagGlobalWireRepeaterType = repeated_none;
+				maxTagGlobalWireRepeaterType = repeated_none;
+			}
+			continue;
+		}
+		if (!strncmp("-TagGlobalWireUseLowSwing", line, strlen("-TagGlobalWireUseLowSwing"))) {
+			sscanf(line, "-TagGlobalWireUseLowSwing: %s", tmp);
+			if (!strcmp(tmp, "Yes")) {
+				minTagIsGlobalWireLowSwing = 1;
+				maxTagIsGlobalWireLowSwing = 1;
+			} else {
+				minTagIsGlobalWireLowSwing = 0;
+				maxTagIsGlobalWireLowSwing = 0;
+			}
+			continue;
+		}
+
 		if (!strncmp("-Routing", line, strlen("-Routing"))) {
 			sscanf(line, "-Routing: %s", tmp);
 			if (!strcmp(tmp, "H-tree"))
@@ -491,6 +625,44 @@ void InputParameter::ReadInputParameterFromFile(const std::string & inputFile) {
 			continue;
 		}
 
+		if (!strncmp("-ForceTagBank", line, strlen("-ForceTagBank"))) {
+			sscanf(line, "-ForceTagBank (Total AxB, Active CxD): %dx%d, %dx%d",
+					&minTagNumRowMat, &minTagNumColumnMat, &minTagNumActiveMatPerColumn, &minTagNumActiveMatPerRow);
+			maxTagNumRowMat = minTagNumRowMat;
+			maxTagNumColumnMat = minTagNumColumnMat;
+			maxTagNumActiveMatPerColumn = minTagNumActiveMatPerColumn;
+			maxTagNumActiveMatPerRow = minTagNumActiveMatPerRow;
+			continue;
+		}
+
+		if (!strncmp("-ForceTagMat", line, strlen("-ForceTagMat"))) {
+			sscanf(line, "-ForceTagMat (Total AxB, Active CxD): %dx%d, %dx%d",
+					&minTagNumRowSubarray, &minTagNumColumnSubarray, &minTagNumActiveSubarrayPerColumn, &minTagNumActiveSubarrayPerRow);
+			maxTagNumRowSubarray = minTagNumRowSubarray;
+			maxTagNumColumnSubarray = minTagNumColumnSubarray;
+			maxTagNumActiveSubarrayPerColumn = minTagNumActiveSubarrayPerColumn;
+			maxTagNumActiveSubarrayPerRow = minTagNumActiveSubarrayPerRow;
+			continue;
+		}
+
+		if (!strncmp("-ForceTagMuxSenseAmp", line, strlen("-ForceTagMuxSenseAmp"))) {
+			sscanf(line, "-ForceTagMuxSenseAmp: %d", &minTagMuxSenseAmp);
+			maxTagMuxSenseAmp = minTagMuxSenseAmp;
+			continue;
+		}
+
+		if (!strncmp("-ForceTagMuxOutputLev1", line, strlen("-ForceTagMuxOutputLev1"))) {
+			sscanf(line, "-ForceTagMuxOutputLev1: %d", &minTagMuxOutputLev1);
+			maxTagMuxOutputLev1 = minTagMuxOutputLev1;
+			continue;
+		}
+
+		if (!strncmp("-ForceTagMuxOutputLev2", line, strlen("-ForceTagMuxOutputLev2"))) {
+			sscanf(line, "-ForceTagMuxOutputLev2: %d", &minTagMuxOutputLev2);
+			maxTagMuxOutputLev2 = minTagMuxOutputLev2;
+			continue;
+		}
+
 		if (!strncmp("-UseCactiAssumption", line, strlen("-UseCactiAssumption"))) {
 			sscanf(line, "-UseCactiAssumption: %s", tmp);
 			if (!strcmp(tmp, "Yes")) {
@@ -532,6 +704,20 @@ void InputParameter::ReadInputParameterFromFile(const std::string & inputFile) {
 			} else {
 				minAreaOptimizationLevel = 1;
 				maxAreaOptimizationLevel = 1;
+			}
+		}
+
+		if (!strncmp("-TagBufferDesignOptimization", line, strlen("-TagBufferDesignOptimization"))) {
+			sscanf(line, "-TagBufferDesignOptimization: %s", tmp);
+			if (!strcmp(tmp, "latency")) {
+				minTagAreaOptimizationLevel = 0;
+				maxTagAreaOptimizationLevel = 0;
+			} else if (!strcmp(tmp, "area")) {
+				minTagAreaOptimizationLevel = 2;
+				maxTagAreaOptimizationLevel = 2;
+			} else {
+				minTagAreaOptimizationLevel = 1;
+				maxTagAreaOptimizationLevel = 1;
 			}
 		}
 

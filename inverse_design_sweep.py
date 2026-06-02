@@ -76,31 +76,67 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
             c, r = int(layout_config["data_num_active_subarray_per_col"]), int(layout_config["data_num_active_subarray_per_row"])
             cfg_content += f"-ForceMat (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
         
-        # Tag array layout forcing - NEED TO IMPLEMENT
-        if layout_config.get("tag_mux_sense_amp") is not None:
-            cfg_content += f"-ForceTagMuxSenseAmp: {int(layout_config['tag_mux_sense_amp'])}\n"
+        if layout_config.get("tag_area_optimization_level") is not None:
+            cfg_content += f"-TagBufferDesignOptimization: {layout_config['tag_area_optimization_level']}\n"
+        if layout_config.get("tag_local_wire_type") is not None:
+            cfg_content += f"-TagLocalWireType: {layout_config['tag_local_wire_type'].replace(' ', '')}\n"
+        if layout_config.get("tag_local_wire_repeater_type") is not None:
+            cfg_content += f"-TagLocalWireRepeaterType: {layout_config['tag_local_wire_repeater_type'].replace(' ', '')}\n"
+        if layout_config.get("tag_local_wire_low_swing") is not None:
+            cfg_content += f"-TagLocalWireUseLowSwing: {layout_config['tag_local_wire_low_swing']}\n"
+        if layout_config.get("tag_global_wire_type") is not None:
+            cfg_content += f"-TagGlobalWireType: {layout_config['tag_global_wire_type'].replace(' ', '')}\n"
+        if layout_config.get("tag_global_wire_repeater_type") is not None:
+            cfg_content += f"-TagGlobalWireRepeaterType: {layout_config['tag_global_wire_repeater_type'].replace(' ', '')}\n"
+        if layout_config.get("tag_global_wire_low_swing") is not None:
+            cfg_content += f"-TagGlobalWireUseLowSwing: {layout_config['tag_global_wire_low_swing']}\n"
+            
+        if layout_config.get("data_local_wire_type") is not None:
+            cfg_content += f"-LocalWireType: {layout_config['data_local_wire_type'].replace(' ', '')}\n"
         if layout_config.get("tag_mux_output_lev1") is not None:
             cfg_content += f"-ForceTagMuxOutputLev1: {int(layout_config['tag_mux_output_lev1'])}\n"
         if layout_config.get("tag_mux_output_lev2") is not None:
             cfg_content += f"-ForceTagMuxOutputLev2: {int(layout_config['tag_mux_output_lev2'])}\n"
-        if layout_config.get("tag_num_active_mat_per_col") is not None and layout_config.get("tag_num_active_mat_per_row") is not None:
+        
+        # for subarray layout forcing
+        if layout_config.get("tag_mux_sense_amp") is not None:
+            cfg_content += f"-ForceTagMuxSenseAmp: {int(layout_config['tag_mux_sense_amp'])}\n"
+        
+        if layout_config.get("tag_num_row_mat") is not None and layout_config.get("tag_num_col_mat") is not None:
+            tc, tr = int(layout_config["tag_num_col_mat"]), int(layout_config["tag_num_row_mat"])
+            ac, ar = tc, tr
+            if layout_config.get("tag_num_active_mat_per_col") is not None:
+                ac = int(layout_config["tag_num_active_mat_per_col"])
+            if layout_config.get("tag_num_active_mat_per_row") is not None:
+                ar = int(layout_config["tag_num_active_mat_per_row"])
+            cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {tc}x{tr}, {ac}x{ar}\n"
+        elif layout_config.get("tag_num_active_mat_per_col") is not None and layout_config.get("tag_num_active_mat_per_row") is not None:
             c, r = int(layout_config["tag_num_active_mat_per_col"]), int(layout_config["tag_num_active_mat_per_row"])
             cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
-        if layout_config.get("tag_num_active_subarray_per_col") is not None and layout_config.get("tag_num_active_subarray_per_row") is not None and not free_mat:
+            
+        if layout_config.get("tag_num_row_subarray") is not None and layout_config.get("tag_num_col_subarray") is not None and not free_mat:
+            tc, tr = int(layout_config["tag_num_col_subarray"]), int(layout_config["tag_num_row_subarray"])
+            ac, ar = tc, tr
+            if layout_config.get("tag_num_active_subarray_per_col") is not None:
+                ac = int(layout_config["tag_num_active_subarray_per_col"])
+            if layout_config.get("tag_num_active_subarray_per_row") is not None:
+                ar = int(layout_config["tag_num_active_subarray_per_row"])
+            cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {tc}x{tr}, {ac}x{ar}\n"
+        elif layout_config.get("tag_num_active_subarray_per_col") is not None and layout_config.get("tag_num_active_subarray_per_row") is not None and not free_mat:
             c, r = int(layout_config["tag_num_active_subarray_per_col"]), int(layout_config["tag_num_active_subarray_per_row"])
             cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
 
         # Array wiring configurations
         if layout_config.get("data_local_wire_type") is not None:
-            cfg_content += f"-LocalWireType: {layout_config['data_local_wire_type']}\n"
+            cfg_content += f"-LocalWireType: {layout_config['data_local_wire_type'].replace(' ', '')}\n"
         if layout_config.get("data_local_wire_repeater_type") is not None:
-            cfg_content += f"-LocalWireRepeaterType: {layout_config['data_local_wire_repeater_type']}\n"
+            cfg_content += f"-LocalWireRepeaterType: {layout_config['data_local_wire_repeater_type'].replace(' ', '')}\n"
         if layout_config.get("data_local_wire_low_swing") is not None:
             cfg_content += f"-LocalWireUseLowSwing: {layout_config['data_local_wire_low_swing']}\n"
         if layout_config.get("data_global_wire_type") is not None:
-            cfg_content += f"-GlobalWireType: {layout_config['data_global_wire_type']}\n"
+            cfg_content += f"-GlobalWireType: {layout_config['data_global_wire_type'].replace(' ', '')}\n"
         if layout_config.get("data_global_wire_repeater_type") is not None:
-            cfg_content += f"-GlobalWireRepeaterType: {layout_config['data_global_wire_repeater_type']}\n"
+            cfg_content += f"-GlobalWireRepeaterType: {layout_config['data_global_wire_repeater_type'].replace(' ', '')}\n"
         if layout_config.get("data_global_wire_low_swing") is not None:
             cfg_content += f"-GlobalWireUseLowSwing: {layout_config['data_global_wire_low_swing']}\n"
 
@@ -158,9 +194,10 @@ def _parse_destiny_output(stdout_text, csv_file):
 
 def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read_voltage,
                           node=32, roadmap="HP", timeout=60, verbose=False, opt_target="ReadLatency",
-                          layout_config=None):
+                          layout_config=None, prefix="validation_temp_bench"):
     """Orchestrates layout generation, simulator execution, and physical parameter extraction."""
-    cell_file, cfg_file, csv_file = "validation_temp_bench.cell", "validation_temp_bench.cfg", "validation_temp_bench.csv"
+    cell_file, cfg_file, csv_file = f"{prefix}.cell", f"{prefix}.cfg", f"{prefix}.csv"
+    log_file = f"{prefix}.log"
 
     def _attempt(free_mat):
         """Run DESTINY once; returns parsed metrics dict or None on failure."""
@@ -169,6 +206,8 @@ def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read
                                       read_voltage, node, roadmap, opt_target, layout_config,
                                       free_mat=free_mat)
             process, stdout_text = _run_destiny_process(cfg_file, timeout, verbose)
+            with open(log_file, "w") as f:
+                f.write(stdout_text)
             csv_exists    = os.path.exists(csv_file)
             success_signal = "Finished!" in stdout_text or "csv generated successfully" in stdout_text or csv_exists
             if (process.returncode != 0 and process.returncode is not None) or "1e+50" in stdout_text or not success_signal:
@@ -176,9 +215,6 @@ def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read
             return _parse_destiny_output(stdout_text, csv_file)
         except Exception:
             return None
-        finally:
-            for f in [cell_file, cfg_file, csv_file]:
-                if os.path.exists(f): os.remove(f)
 
     # first attempt - use all force commands from inverse designer 
     result = _attempt(free_mat=False)
@@ -231,6 +267,15 @@ BENCHING_LAYOUT_COLS = [
     "tag_num_active_mat_per_col",
     "tag_num_active_subarray_per_row",
     "tag_num_active_subarray_per_col",
+    "tag_num_row_subarray",
+    "tag_num_col_subarray",
+    "tag_area_optimization_level",
+    "tag_local_wire_type",
+    "tag_local_wire_repeater_type",
+    "tag_local_wire_low_swing",
+    "tag_global_wire_type",
+    "tag_global_wire_repeater_type",
+    "tag_global_wire_low_swing",
     "data_local_wire_type",
     "data_local_wire_repeater_type",
     "data_local_wire_low_swing",
@@ -240,9 +285,9 @@ BENCHING_LAYOUT_COLS = [
     "data_area_optimization_level",
 ]
 
-def _layout_from_row(row):
+def _layout_from_row(row, prefix=""):
     """Maps layout matrix configurations directly to physical array forced routing definitions."""
-    return {k: row[k] for k in BENCHING_LAYOUT_COLS if k in row.index and not (isinstance(row[k], float) and np.isnan(row[k]))}
+    return {k: row[prefix+k] for k in BENCHING_LAYOUT_COLS if prefix+k in row.index and not (isinstance(row[prefix+k], float) and np.isnan(row[prefix+k]))}
 
 def _load_and_filter_data(args, data_csv):
     """Applies operating parameter constraints to exclude numerical compiler crashes and invalid layouts."""
@@ -342,32 +387,67 @@ def _validate_top_designs(ppa_results, n_validate, args):
     print(f"\n[4/5] Running physical validation for top-{n_validate} optimal configurations...\n")
     for rank, ri in enumerate(ppa_results["post_snap_surr_mean_abs_err_pct"].sort_values().head(n_validate).index, 1):
         row = ppa_results.loc[ri]
+        
+        # 1. Run validation on the optimized configuration
         layout_config = _layout_from_row(row)
+        opt_prefix = os.path.join(args.output_dir, f"rank{rank}_opt")
         destiny_ppa = validate_and_capture(
             tech=args.tech, cap_kb=int(row.capacity_kb), ww=int(row.word_width_bits),
             assoc=int(row.associativity), stack=max(1, int(row.data_stacked_die_count)),
             temp=int(row["_temp"]), wn=float(row["_wn"]), wp=float(row["_wp"]), wac=float(row["_wac"]), read_voltage=float(row["_read_voltage"]),
             node=int(row.get("node_nm", args.node)), roadmap=args.roadmap, timeout=args.destiny_timeout, verbose=args.verbose_destiny, opt_target="ReadLatency",
-            layout_config=layout_config
+            layout_config=layout_config, prefix=opt_prefix
         )
-        if destiny_ppa is None:
-            print("    [warn] Validation failed.\n"); continue
+        if destiny_ppa is not None:
+            ppa_results.at[ri, "destiny_used_fallback_mat"] = destiny_ppa.get("_used_fallback_mat", False)
 
-        ppa_results.at[ri, "destiny_used_fallback_mat"] = destiny_ppa.get("_used_fallback_mat", False)
+            dest_errs = []
+            for k in args.metrics:
+                dx = destiny_ppa.get(k)
+                ppa_results.at[ri, f"destiny_{k}"] = dx
+                if dx is not None:
+                    err = pct_err(dx, row[f"target_{k}"])
+                    ppa_results.at[ri, f"destiny_err_{k}_pct"] = err
+                    dest_errs.append(abs(err))
+                    
+            d_mean = np.mean(dest_errs) if dest_errs else float("nan")
+            ppa_results.at[ri, "destiny_mean_abs_err_pct"] = d_mean
+            print(f"    Validation Solver PPA Extracted -> Mean Physical Residual: {d_mean:.2f}%\n")
+        else:
+            print("    [warn] Validation failed.\n")
 
-        dest_errs = []
-        for k in args.metrics:
-            dx = destiny_ppa.get(k)
-            ppa_results.at[ri, f"destiny_{k}"] = dx
-            if dx is not None:
-                err = pct_err(dx, row[f"target_{k}"])
-                ppa_results.at[ri, f"destiny_err_{k}_pct"] = err
-                dest_errs.append(abs(err))
-                
-        d_mean = np.mean(dest_errs) if dest_errs else float("nan")
-        ppa_results.at[ri, "destiny_mean_abs_err_pct"] = d_mean
-        print(f"    Validation Solver PPA Extracted -> Mean Physical Residual: {d_mean:.2f}%\n")
+        # 2. Run validation on the original configuration
+        orig_layout_config = _layout_from_row(row, prefix="orig_")
+        orig_prefix = os.path.join(args.output_dir, f"rank{rank}_orig")
         
+        orig_temp = int(SRAM_TEMPERATURE_MAP.get(max(1, int(row.orig_data_stacked_die_count)), 350))
+        
+        orig_destiny_ppa = validate_and_capture(
+            tech=args.tech, cap_kb=int(row.orig_capacity_kb), ww=int(row.orig_word_width_bits),
+            assoc=int(row.orig_associativity), stack=max(1, int(row.orig_data_stacked_die_count)),
+            temp=orig_temp, wn=float(row.orig_wn), wp=float(row.orig_wp), wac=float(row.orig_wac), read_voltage=float(row.orig_rv),
+            node=int(row.get("node_nm", args.node)), roadmap=args.roadmap, timeout=args.destiny_timeout, verbose=args.verbose_destiny, opt_target="ReadLatency",
+            layout_config=orig_layout_config, prefix=orig_prefix
+        )
+
+        if orig_destiny_ppa is not None:
+            ppa_results.at[ri, "orig_destiny_used_fallback_mat"] = orig_destiny_ppa.get("_used_fallback_mat", False)
+
+            orig_dest_errs = []
+            for k in args.metrics:
+                dx = orig_destiny_ppa.get(k)
+                ppa_results.at[ri, f"orig_destiny_{k}"] = dx
+                if dx is not None:
+                    err = pct_err(dx, row[f"target_{k}"])
+                    ppa_results.at[ri, f"orig_destiny_err_{k}_pct"] = err
+                    orig_dest_errs.append(abs(err))
+                    
+            orig_d_mean = np.mean(orig_dest_errs) if orig_dest_errs else float("nan")
+            ppa_results.at[ri, "orig_destiny_mean_abs_err_pct"] = orig_d_mean
+            print(f"    Validation Solver PPA (Original) Extracted -> Mean Physical Residual: {orig_d_mean:.2f}%\n")
+        else:
+            print("    [warn] Validation on original config failed.\n")
+            
     return ppa_results
 
 # Analysis & Ranking

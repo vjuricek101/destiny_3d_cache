@@ -85,10 +85,36 @@ public:
 	int maxMuxOutputLev1;
 	int minMuxOutputLev2;
 	int maxMuxOutputLev2;
+
+	int minTagNumRowMat;
+	int maxTagNumRowMat;
+	int minTagNumColumnMat;
+	int maxTagNumColumnMat;
+	int minTagNumActiveMatPerRow;
+	int maxTagNumActiveMatPerRow;
+	int minTagNumActiveMatPerColumn;
+	int maxTagNumActiveMatPerColumn;
+	int minTagNumRowSubarray;
+	int maxTagNumRowSubarray;
+	int minTagNumColumnSubarray;
+	int maxTagNumColumnSubarray;
+	int minTagNumActiveSubarrayPerRow;
+	int maxTagNumActiveSubarrayPerRow;
+	int minTagNumActiveSubarrayPerColumn;
+	int maxTagNumActiveSubarrayPerColumn;
+	int minTagMuxSenseAmp;
+	int maxTagMuxSenseAmp;
+	int minTagMuxOutputLev1;
+	int maxTagMuxOutputLev1;
+	int minTagMuxOutputLev2;
+	int maxTagMuxOutputLev2;
+
 	int minNumRowPerSet;
 	int maxNumRowPerSet;
 	int minAreaOptimizationLevel;	/* This one is actually OptPriority type */
 	int maxAreaOptimizationLevel;	/* This one is actually OptPriority type */
+	int minTagAreaOptimizationLevel;
+	int maxTagAreaOptimizationLevel;
 	int minLocalWireType;			/* This one is actually WireType type */
 	int maxLocalWireType;			/* This one is actually WireType type */
 	int minGlobalWireType;			/* This one is actually WireType type */
@@ -101,6 +127,19 @@ public:
 	int maxIsLocalWireLowSwing;		/* This one is actually boolean */
 	int minIsGlobalWireLowSwing;		/* This one is actually boolean */
 	int maxIsGlobalWireLowSwing;		/* This one is actually boolean */
+
+	int minTagLocalWireType;			/* This one is actually WireType type */
+	int maxTagLocalWireType;			/* This one is actually WireType type */
+	int minTagGlobalWireType;			/* This one is actually WireType type */
+	int maxTagGlobalWireType;			/* This one is actually WireType type */
+	int minTagLocalWireRepeaterType;		/* This one is actually WireRepeaterType type */
+	int maxTagLocalWireRepeaterType;		/* This one is actually WireRepeaterType type */
+	int minTagGlobalWireRepeaterType;		/* This one is actually WireRepeaterType type */
+	int maxTagGlobalWireRepeaterType;		/* This one is actually WireRepeaterType type */
+	int minTagIsLocalWireLowSwing;		/* This one is actually boolean */
+	int maxTagIsLocalWireLowSwing;		/* This one is actually boolean */
+	int minTagIsGlobalWireLowSwing;		/* This one is actually boolean */
+	int maxTagIsGlobalWireLowSwing;		/* This one is actually boolean */
 
     int partitionGranularity;
     int localTsvProjection;  // 0 -- ITRS, 1 -- Industry Reported
