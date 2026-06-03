@@ -1,73 +1,30 @@
 #!/usr/bin/env python3
 import os, argparse, json, pickle
 import torch
-import torch.nn as nn
 import numpy as np
 import pandas as pd
 from train_model import PPA_MLP
 import sys
 from destiny_utils import (
     TARGET_COLS as TARGET_KEYS,
-    TARGET_LABELS,
     TARGET_SHORT_LABELS,
     get_active_targets,
+    build_fixed_context,
+    parse_fixed_arg,
+    nearest_valid,
+    build_dyn_idx,
+    BASE_ARCH_COLS,
+    BASE_ARCH_BOUNDS,
+    DATA_PARAM_BOUNDS_LOG2,
+    DATA_PARAM_BOUNDS_LINEAR,
+    SRAM_CELL_BOUNDS_LOG10,
+    SRAM_CELL_BOUNDS_LINEAR,
+    _MUX_VALID,
+    _MAT_VALID,
 )
-
-# Architectural bounds (log10 for capacity, log2 for everything else)
-BASE_ARCH_BOUNDS = [
-    (np.log10(2),  np.log10(32768)),  # capacity_kb  (log10)
-    (6,            11),               # word_width    (log2)
-    (0,            6),                # associativity (log2)
-    (0,            4),                # stacked_die   (log2)
-]
-BASE_ARCH_COLS = ["capacity_kb", "word_width_bits", "associativity", "data_stacked_die_count"]
-
-DATA_PARAM_BOUNDS_LOG2 = {
-    "data_mux_sense_amp":           (0, 6),
-    "data_mux_output_lev1":         (0, 6),
-    "data_mux_output_lev2":         (0, 6),
-    "data_num_active_mat_per_row":  (0, 4),
-    "data_num_active_mat_per_col":  (0, 4),
-    "tag_num_row_mat":              (0, 6),
-    "tag_num_col_mat":              (0, 6),
-    "tag_mux_sense_amp":            (0, 6),
-    "tag_mux_output_lev1":          (0, 6),
-    "tag_mux_output_lev2":          (0, 6),
-    "tag_num_active_mat_per_row":   (0, 6),
-    "tag_num_active_mat_per_col":   (0, 6),
-}
-DATA_PARAM_BOUNDS_LINEAR = {
-    "data_num_active_subarray_per_row": (1, 2),
-    "data_num_active_subarray_per_col": (1, 2),
-    "tag_num_active_subarray_per_row":  (1, 2),
-    "tag_num_active_subarray_per_col":  (1, 2),
-}
-
-_MUX_VALID = [1, 2, 4, 8, 16, 32, 64]
-_MAT_VALID = [1, 2, 4, 8, 16]
-
-def _nearest_valid(val: int, valid_set: list) -> int:
-    return min(valid_set, key=lambda v: abs(v - val))
-
-SRAM_CELL_BOUNDS_LOG10 = {
-    "CellInput_SRAMCellNMOSWidth (F)": (2.2, 2.5),
-    "CellInput_SRAMCellPMOSWidth (F)": (1.0, 1.1),
-    "CellInput_AccessCMOSWidth (F)":   (1.1, 1.25),
-}
-SRAM_CELL_BOUNDS_LINEAR = {
-    "CellInput_ReadVoltage (V)": (0.5, 1.2),
-}
 
 # -- Module-level helpers ------------------------------------------------------
 
-def _build_dyn_idx(feature_cols, opt_cols):
-    """Index of all columns updated per gradient step."""
-    dyn_keys = set(opt_cols) | {
-        "derived_sqrt_capacity", "derived_cap_per_die", "derived_rows_per_die",
-        "CellInput_CellArea (F^2)", "derived_sqrt_area", "derived_read_v_sq",
-        "CellInput_MinSenseVoltage (mV)", "CellInput_CellAspectRatio",
-    } | {f"device_roadmap_{rm}_x_log10_cap" for rm in ["HP", "LOP", "LSTP"]}
-    return {k: i for i, k in enumerate(feature_cols) if k in dyn_keys}
 
 
 def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, device):
@@ -107,9 +64,6 @@ def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, de
         v_sense = torch.clamp(v_sense, 5.0, 80.0)
         x[dyn_idx["CellInput_MinSenseVoltage (mV)"]] = v_sense
 
-    if "CellInput_CellAspectRatio" in dyn_idx:
-        x[dyn_idx["CellInput_CellAspectRatio"]] = torch.tensor(1.4600, device=device)
-
 
 def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
     """Convert continuous log-space optimised params to snapped physical values."""
@@ -124,9 +78,9 @@ def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
         elif col in log2_cols:
             raw = int(2 ** round(lv))
             if "mux_" in col:
-                design[col] = _nearest_valid(raw, _MUX_VALID)
+                design[col] = nearest_valid(raw, _MUX_VALID)
             elif "_mat_" in col or "num_row_mat" in col or "num_col_mat" in col:
-                design[col] = _nearest_valid(raw, _MAT_VALID)
+                design[col] = nearest_valid(raw, _MAT_VALID)
             else:
                 design[col] = raw
         elif col in linear_cols:
@@ -197,9 +151,6 @@ class InverseOptimizer:
         self.device = torch.device("cpu")
 
         model_dir = f"model_output/{tech.lower()}_feasibility"
-        if not os.path.exists(model_dir):
-            print(f"WARNING: {model_dir} not found, trying default 'model_output'")
-            model_dir = "model_output"
 
         with open(os.path.join(model_dir, "feature_cols.json")) as f:
             self.feature_cols = json.load(f)
@@ -287,15 +238,13 @@ class InverseOptimizer:
             else:
                 w_tensor = torch.tensor(target_weights, dtype=torch.float32, device=self.device)
 
-        dyn_idx = _build_dyn_idx(self.feature_cols, self.opt_cols)
+        dyn_idx = build_dyn_idx(self.feature_cols, self.opt_cols)
 
         # Static base vector from fixed_context (dynamic cols filled per step)
         base_x = torch.zeros(len(self.feature_cols), device=self.device)
         for i, c in enumerate(self.feature_cols):
             if c not in dyn_idx:
                 base_x[i] = float(fixed_context.get(c, 0.0))
-
-
 
         lo_bound = torch.tensor([b[0] for b in self.opt_bounds], device=self.device)
         hi_bound = torch.tensor([b[1] for b in self.opt_bounds], device=self.device)
@@ -311,7 +260,10 @@ class InverseOptimizer:
             for _ in range(steps):
                 inner_opt.zero_grad()
                 log_vals  = params * (hi_bound - lo_bound) + lo_bound
-                cap_log10 = log_vals[self.opt_cols.index("capacity_kb")]
+                if "capacity_kb" in self.opt_cols:
+                    cap_log10 = log_vals[self.opt_cols.index("capacity_kb")]
+                else:
+                    cap_log10 = torch.tensor(math.log10(float(fixed_context.get("capacity_kb", 64.0))), device=self.device)
                 cap_phys  = 10 ** cap_log10
 
                 x = base_x.clone()
@@ -351,7 +303,7 @@ class InverseOptimizer:
                 pred, p_feas    = self.model.forward_with_feasibility(x_scaled)
                 learned_penalty = 50.0 * (1.0 - p_feas.squeeze())
                 # Physics: penalise designs where rows_per_subarray is not a positive power-of-two
-                physics_penalty = 5.0 * _rows_per_subarray_penalty(log_vals, self.opt_cols, cap_log10, ww_log2)
+                physics_penalty = 20.0 * _rows_per_subarray_penalty(log_vals, self.opt_cols, cap_log10, ww_log2)
 
                 loss    = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty + physics_penalty
                 barrier = (torch.relu(-params) ** 2).sum() + (torch.relu(params - 1.0) ** 2).sum()
@@ -421,7 +373,10 @@ class InverseOptimizer:
                 else:
                     snapped_log_vals[j] = val
 
-            cap_log10_snap = snapped_log_vals[self.opt_cols.index("capacity_kb")]
+            if "capacity_kb" in self.opt_cols:
+                cap_log10_snap = snapped_log_vals[self.opt_cols.index("capacity_kb")]
+            else:
+                cap_log10_snap = torch.tensor(math.log10(float(fixed_context.get("capacity_kb", 64.0))), device=self.device)
             cap_phys_snap  = 10 ** cap_log10_snap
 
             x_snap = base_x.clone()
@@ -492,17 +447,23 @@ if __name__ == "__main__":
     p.add_argument("--node",           type=int, default=32, choices=[22, 32, 45, 65])
     p.add_argument("--roadmap",        default="HP", choices=["HP", "LOP", "LSTP"])
     p.add_argument("--temperature",    type=float, default=350.0)
+    p.add_argument(
+        "--fix", nargs="*", default=[], metavar="KEY=VALUE", type=parse_fixed_arg,
+        help="Pin design parameters as optimizer constants. "
+             "Values are auto-coerced to int, float, or str. "
+             "E.g. --fix capacity_kb=64 associativity=8"
+    )
     p.add_argument("--output",         default=None, help="CSV to append results to")
     p.add_argument("--verbose-opt",    action="store_true", help="Print pre/post-snap parameter table")
     args = p.parse_args()
 
     targets = {k: v for k, v in [
         ("cache_area_mm2",           args.target_area),
-        ("cache_hit_latency_ns",     args.target_read_latency if args.target_read_latency is not None else args.target_latency),
-        ("cache_write_latency_ns",    args.target_write_latency),
-        ("cache_refresh_latency_ns",  args.target_refresh_latency),
+        ("cache_hit_latency_ns",     args.target_read_latency),
+        ("cache_write_latency_ns",   args.target_write_latency),
+        ("cache_refresh_latency_ns", args.target_refresh_latency),
         ("cache_hit_energy_nJ",      args.target_hit_energy),
-        ("cache_write_energy_nJ",    args.target_write_energy if args.target_write_energy is not None else args.target_energy),
+        ("cache_write_energy_nJ",    args.target_write_energy),
         ("cache_refresh_energy_nJ",  args.target_refresh_energy),
         ("cache_leakage_mW",         args.target_leakage),
     ] if v is not None}
@@ -510,11 +471,8 @@ if __name__ == "__main__":
     if not targets:
         p.error("Specify at least one target via --target-read-latency / --target-area / etc.")
 
-    context = {
-        f"process_node_nm_{args.node}":   1.0,
-        f"device_roadmap_{args.roadmap}": 1.0,
-        "temperature_K":                  args.temperature,
-    }
+    fixed   = dict(args.fix)
+    context = build_fixed_context(args.node, args.roadmap, args.temperature, **fixed)
 
     design, ppa, pre_snap, snapped_ppa = InverseOptimizer(args.tech).optimize(
         targets, context, verbose=args.verbose_opt)

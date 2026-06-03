@@ -96,16 +96,12 @@ def main():
         if args.verbose_opt: cmd.append("--verbose-opt")
 
         try:
-            res = subprocess.run(cmd, check=True)
-            if res.returncode == 0:
-                n_done += 1
-                print(f"  [success] Sweep Node={node}nm | {roadmap} | {variant} completed successfully.")
-            else:
-                n_failed += 1
-                print(f"  [error] Sweep Node={node}nm | {roadmap} | {variant} failed (exit code {res.returncode}).")
+            subprocess.run(cmd, check=True)
+            n_done += 1
+            print(f"  [success] Sweep Node={node}nm | {roadmap} | {variant} completed.")
         except subprocess.CalledProcessError as e:
             n_failed += 1
-            print(f"  [error] Subprocess crashed: {e}")
+            print(f"  [error] Subprocess failed: {e}")
 
 # Analysis & Ranking
 

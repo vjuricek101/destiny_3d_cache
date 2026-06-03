@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Runs one configuration + produces one csv + plot"""
 
-import os, sys, argparse, subprocess, warnings, time, threading, shutil, re, glob
+import os, sys, argparse, subprocess, warnings, time, threading, shutil, re, glob, datetime
 import numpy as np
 import pandas as pd
 import matplotlib
@@ -21,7 +21,6 @@ from destiny_utils import (
     METRIC_TO_PPA_LABEL,
     LAYOUT_COLS as _LAYOUT_COLS,
     TARGET_COLS as TARGET_KEYS,
-    TARGET_LABELS,
     TECH_SKIP_TARGETS,
     get_active_targets,
 )
@@ -31,19 +30,25 @@ warnings.filterwarnings("ignore", category=UserWarning)
 # Temperature co-varies with stack count (from run_exploration.py).
 SRAM_TEMPERATURE_MAP = {1: 300, 2: 363, 4: 380}
 
-def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read_voltage, node, roadmap, opt_target, layout_config, free_mat=False):
+def _map_repeater(val):
+    v = str(val)
+    if "Fully-Optimized" in v or "Opt" in v: return "RepeatedOpt"
+    if "No" in v: return "RepeatedNone"
+    return v.replace(' ', '')
+
+def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read_voltage, cell_aspect_ratio, node, roadmap, opt_target, layout_config, free_mat=False, free_bank=False):
     """Writes physical cell parameters and array routing configuration files to invoke DESTINY compiler."""
     cell_params = {"SRAMCellNMOSWidth (F)": wn, "SRAMCellPMOSWidth (F)": wp, "AccessCMOSWidth (F)": wac}
     derive_sram_physical_params(cell_params, node)
 
     cell_content = f"""-MemCellType: SRAM
--CellArea (F^2): {cell_params["CellArea (F^2)"]:.4f}
+-CellArea (F^2): {cell_params["CellArea (F^2)"]:.5f}
 -SRAMCellNMOSWidth (F): {wn:.4f}
 -SRAMCellPMOSWidth (F): {wp:.4f}
 -AccessCMOSWidth (F): {wac:.4f}
 -AccessType: CMOS
 -MinSenseVoltage (mV): {cell_params["MinSenseVoltage (mV)"]:.4f}
--CellAspectRatio: 1.4600
+-CellAspectRatio: {cell_aspect_ratio:.4f}
 -ReadVoltage (V): {read_voltage:.4f}
 -Stitching: 16
 """
@@ -69,7 +74,7 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
             cfg_content += f"-ForceMuxOutputLev1: {int(layout_config['data_mux_output_lev1'])}\n"
         if layout_config.get("data_mux_output_lev2") is not None:
             cfg_content += f"-ForceMuxOutputLev2: {int(layout_config['data_mux_output_lev2'])}\n"
-        if layout_config.get("data_num_active_mat_per_col") is not None and layout_config.get("data_num_active_mat_per_row") is not None:
+        if layout_config.get("data_num_active_mat_per_col") is not None and layout_config.get("data_num_active_mat_per_row") is not None and not free_bank:
             c, r = int(layout_config["data_num_active_mat_per_col"]), int(layout_config["data_num_active_mat_per_row"])
             cfg_content += f"-ForceBank (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
         if layout_config.get("data_num_active_subarray_per_col") is not None and layout_config.get("data_num_active_subarray_per_row") is not None and not free_mat:
@@ -77,17 +82,19 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
             cfg_content += f"-ForceMat (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
         
         if layout_config.get("tag_area_optimization_level") is not None:
-            cfg_content += f"-TagBufferDesignOptimization: {layout_config['tag_area_optimization_level']}\n"
+            val = str(layout_config['tag_area_optimization_level']).lower()
+            val = "latency" if "latency" in val else ("area" if "area" in val else layout_config['tag_area_optimization_level'])
+            cfg_content += f"-TagBufferDesignOptimization: {val}\n"
         if layout_config.get("tag_local_wire_type") is not None:
             cfg_content += f"-TagLocalWireType: {layout_config['tag_local_wire_type'].replace(' ', '')}\n"
         if layout_config.get("tag_local_wire_repeater_type") is not None:
-            cfg_content += f"-TagLocalWireRepeaterType: {layout_config['tag_local_wire_repeater_type'].replace(' ', '')}\n"
+            cfg_content += f"-TagLocalWireRepeaterType: {_map_repeater(layout_config['tag_local_wire_repeater_type'])}\n"
         if layout_config.get("tag_local_wire_low_swing") is not None:
             cfg_content += f"-TagLocalWireUseLowSwing: {layout_config['tag_local_wire_low_swing']}\n"
         if layout_config.get("tag_global_wire_type") is not None:
             cfg_content += f"-TagGlobalWireType: {layout_config['tag_global_wire_type'].replace(' ', '')}\n"
         if layout_config.get("tag_global_wire_repeater_type") is not None:
-            cfg_content += f"-TagGlobalWireRepeaterType: {layout_config['tag_global_wire_repeater_type'].replace(' ', '')}\n"
+            cfg_content += f"-TagGlobalWireRepeaterType: {_map_repeater(layout_config['tag_global_wire_repeater_type'])}\n"
         if layout_config.get("tag_global_wire_low_swing") is not None:
             cfg_content += f"-TagGlobalWireUseLowSwing: {layout_config['tag_global_wire_low_swing']}\n"
             
@@ -102,15 +109,15 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
         if layout_config.get("tag_mux_sense_amp") is not None:
             cfg_content += f"-ForceTagMuxSenseAmp: {int(layout_config['tag_mux_sense_amp'])}\n"
         
-        if layout_config.get("tag_num_row_mat") is not None and layout_config.get("tag_num_col_mat") is not None:
+        if layout_config.get("tag_num_row_mat") is not None and layout_config.get("tag_num_col_mat") is not None and not free_bank:
             tc, tr = int(layout_config["tag_num_col_mat"]), int(layout_config["tag_num_row_mat"])
             ac, ar = tc, tr
             if layout_config.get("tag_num_active_mat_per_col") is not None:
                 ac = int(layout_config["tag_num_active_mat_per_col"])
             if layout_config.get("tag_num_active_mat_per_row") is not None:
                 ar = int(layout_config["tag_num_active_mat_per_row"])
-            cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {tc}x{tr}, {ac}x{ar}\n"
-        elif layout_config.get("tag_num_active_mat_per_col") is not None and layout_config.get("tag_num_active_mat_per_row") is not None:
+            cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {tr}x{tc}, {ac}x{ar}\n"
+        elif layout_config.get("tag_num_active_mat_per_col") is not None and layout_config.get("tag_num_active_mat_per_row") is not None and not free_bank:
             c, r = int(layout_config["tag_num_active_mat_per_col"]), int(layout_config["tag_num_active_mat_per_row"])
             cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
             
@@ -121,7 +128,7 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
                 ac = int(layout_config["tag_num_active_subarray_per_col"])
             if layout_config.get("tag_num_active_subarray_per_row") is not None:
                 ar = int(layout_config["tag_num_active_subarray_per_row"])
-            cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {tc}x{tr}, {ac}x{ar}\n"
+            cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {tr}x{tc}, {ac}x{ar}\n"
         elif layout_config.get("tag_num_active_subarray_per_col") is not None and layout_config.get("tag_num_active_subarray_per_row") is not None and not free_mat:
             c, r = int(layout_config["tag_num_active_subarray_per_col"]), int(layout_config["tag_num_active_subarray_per_row"])
             cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
@@ -130,19 +137,21 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
         if layout_config.get("data_local_wire_type") is not None:
             cfg_content += f"-LocalWireType: {layout_config['data_local_wire_type'].replace(' ', '')}\n"
         if layout_config.get("data_local_wire_repeater_type") is not None:
-            cfg_content += f"-LocalWireRepeaterType: {layout_config['data_local_wire_repeater_type'].replace(' ', '')}\n"
+            cfg_content += f"-LocalWireRepeaterType: {_map_repeater(layout_config['data_local_wire_repeater_type'])}\n"
         if layout_config.get("data_local_wire_low_swing") is not None:
             cfg_content += f"-LocalWireUseLowSwing: {layout_config['data_local_wire_low_swing']}\n"
         if layout_config.get("data_global_wire_type") is not None:
             cfg_content += f"-GlobalWireType: {layout_config['data_global_wire_type'].replace(' ', '')}\n"
         if layout_config.get("data_global_wire_repeater_type") is not None:
-            cfg_content += f"-GlobalWireRepeaterType: {layout_config['data_global_wire_repeater_type'].replace(' ', '')}\n"
+            cfg_content += f"-GlobalWireRepeaterType: {_map_repeater(layout_config['data_global_wire_repeater_type'])}\n"
         if layout_config.get("data_global_wire_low_swing") is not None:
             cfg_content += f"-GlobalWireUseLowSwing: {layout_config['data_global_wire_low_swing']}\n"
 
         # Buffer design optimization level
         if layout_config.get("data_area_optimization_level") is not None:
-            cfg_content += f"-BufferDesignOptimization: {layout_config['data_area_optimization_level']}\n"
+            val = str(layout_config['data_area_optimization_level']).lower()
+            val = "latency" if "latency" in val else ("area" if "area" in val else layout_config['data_area_optimization_level'])
+            cfg_content += f"-BufferDesignOptimization: {val}\n"
 
     with open(cell_file, "w") as f: f.write(cell_content)
     with open(cfg_file,  "w") as f: f.write(cfg_content)
@@ -170,65 +179,118 @@ def _run_destiny_process(cfg_file, timeout, verbose):
 def _parse_destiny_output(stdout_text, csv_file):
     """Extracts cache-level physical latency, area, energy, and leakage metrics from simulator logs."""
     metrics_regex = {
-        "cache_area_mm2": (r"(?:Total|Cache) Area\s*=\s*([\d.]+)\s*(mm\^2|um\^2)", lambda v, u: v / 1e6 if u == "um^2" else v),
-        "cache_hit_latency_ns": (r"Read Latency\s*=\s*([\d.]+)\s*(ps|ns|us)", lambda v, u: v / 1000 if u == "ps" else (v * 1000 if u == "us" else v)),
-        "cache_write_latency_ns": (r"Write Latency\s*=\s*([\d.]+)\s*(ps|ns|us)", lambda v, u: v / 1000 if u == "ps" else (v * 1000 if u == "us" else v)),
-        "cache_refresh_latency_ns": (r"Refresh Latency\s*=\s*([\d.]+)\s*(ps|ns|us)", lambda v, u: v / 1000 if u == "ps" else (v * 1000 if u == "us" else v)),
-        "cache_hit_energy_nJ": (r"Read Dynamic Energy\s*=\s*([\d.]+)\s*(p|n|u)?J", lambda v, u: v / 1000 if u == "p" else (v * 1000 if u == "u" else v)),
-        "cache_write_energy_nJ": (r"Write Dynamic Energy\s*=\s*([\d.]+)\s*(p|n|u)?J", lambda v, u: v / 1000 if u == "p" else (v * 1000 if u == "u" else v)),
-        "cache_refresh_energy_nJ": (r"Refresh Dynamic Energy\s*=\s*([\d.]+)\s*(p|n|u)?J", lambda v, u: v / 1000 if u == "p" else (v * 1000 if u == "u" else v)),
-        "cache_leakage_mW": (r"Leakage Power\s*=\s*([\d.]+)\s*(p|n|u|m)?W", lambda v, u: v / 1000 if u == "u" else (v / 1e6 if u == "n" else (v / 1e9 if u == "p" else (v * 1000 if not u else v))))
+        "cache_area_mm2": (
+            r"(?:Total|Cache) Area\s*=\s*([\d.]+)\s*(mm\^2|um\^2)",
+            lambda v, u: v / 1e6 if u == "um^2" else v,
+        ),
+        "cache_hit_latency_ns": (
+            r"(?:Read|Cache Hit) Latency\s*=\s*([\d.]+)\s*(ps|ns|us)",
+            lambda v, u: v / 1000 if u == "ps" else (v * 1000 if u == "us" else v),
+        ),
+        "cache_write_latency_ns": (
+            r"(?:Write|Cache Write) Latency\s*=\s*([\d.]+)\s*(ps|ns|us)",
+            lambda v, u: v / 1000 if u == "ps" else (v * 1000 if u == "us" else v),
+        ),
+        "cache_refresh_latency_ns": (
+            r"(?:Refresh|Cache Refresh) Latency\s*=\s*([\d.]+)\s*(ps|ns|us)",
+            lambda v, u: v / 1000 if u == "ps" else (v * 1000 if u == "us" else v),
+        ),
+        "cache_hit_energy_nJ": (
+            r"(?:Read|Cache Hit) Dynamic Energy\s*=\s*([\d.]+)\s*(p|n|u)?J",
+            lambda v, u: v / 1000 if u == "p" else (v * 1000 if u == "u" else v),
+        ),
+        "cache_write_energy_nJ": (
+            r"(?:Write|Cache Write) Dynamic Energy\s*=\s*([\d.]+)\s*(p|n|u)?J",
+            lambda v, u: v / 1000 if u == "p" else (v * 1000 if u == "u" else v),
+        ),
+        "cache_refresh_energy_nJ": (
+            r"(?:Refresh|Cache Refresh) Dynamic Energy\s*=\s*([\d.]+)\s*(p|n|u)?J",
+            lambda v, u: v / 1000 if u == "p" else (v * 1000 if u == "u" else v),
+        ),
+        "cache_leakage_mW": (
+            r"(?:Leakage|Cache Total Leakage) Power\s*=\s*([\d.]+)\s*(p|n|u|m)?W",
+            lambda v, u: (
+                v / 1000 if u == "u" else
+                (v / 1e6 if u == "n" else
+                 (v / 1e9 if u == "p" else
+                  (v * 1000 if not u else v)))
+            ),
+        ),
     }
     destiny_ppa_metrics = {}
     for key, (regex, scale_fn) in metrics_regex.items():
         m = re.search(regex, stdout_text)
-        if m: destiny_ppa_metrics[key] = scale_fn(float(m.group(1)), m.group(2))
+        if m:
+            destiny_ppa_metrics[key] = scale_fn(float(m.group(1)), m.group(2) if m.lastindex >= 2 else "")
     
     if not destiny_ppa_metrics and os.path.exists(csv_file):
-        try:
-            ppa_df = pd.read_csv(csv_file)
-            destiny_ppa_metrics = {c: float(ppa_df[c].iloc[0]) for c in metrics_regex if c in ppa_df.columns}
-        except Exception:
-            pass
-    return destiny_ppa_metrics if destiny_ppa_metrics else None
+        ppa_df = pd.read_csv(csv_file)
+        destiny_ppa_metrics = {c: float(ppa_df[c].iloc[0]) for c in metrics_regex if c in ppa_df.columns}
+    return destiny_ppa_metrics or None
 
-def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read_voltage,
+def validate_and_capture(tech, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read_voltage, cell_aspect_ratio,
                           node=32, roadmap="HP", timeout=60, verbose=False, opt_target="ReadLatency",
                           layout_config=None, prefix="validation_temp_bench"):
-    """Orchestrates layout generation, simulator execution, and physical parameter extraction."""
+    """Orchestrates layout generation, simulator execution, and physical parameter extraction.
+    
+    Four-tier fallback strategy:
+      Tier 1: Force everything (bank + mat)
+      Tier 2: Free mat, keep bank forced
+      Tier 3: Free bank, keep mat forced
+      Tier 4: Free both bank and mat
+    """
     cell_file, cfg_file, csv_file = f"{prefix}.cell", f"{prefix}.cfg", f"{prefix}.csv"
     log_file = f"{prefix}.log"
 
-    def _attempt(free_mat):
+    def _attempt(free_mat, free_bank):
         """Run DESTINY once; returns parsed metrics dict or None on failure."""
-        try:
-            _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, temp, wn, wp, wac,
-                                      read_voltage, node, roadmap, opt_target, layout_config,
-                                      free_mat=free_mat)
-            process, stdout_text = _run_destiny_process(cfg_file, timeout, verbose)
-            with open(log_file, "w") as f:
-                f.write(stdout_text)
-            csv_exists    = os.path.exists(csv_file)
-            success_signal = "Finished!" in stdout_text or "csv generated successfully" in stdout_text or csv_exists
-            if (process.returncode != 0 and process.returncode is not None) or "1e+50" in stdout_text or not success_signal:
-                return None
-            return _parse_destiny_output(stdout_text, csv_file)
-        except Exception:
+        _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, temp, wn, wp, wac,
+                                  read_voltage, cell_aspect_ratio, node, roadmap, opt_target, layout_config,
+                                  free_mat=free_mat, free_bank=free_bank)
+        process, stdout_text = _run_destiny_process(cfg_file, timeout, verbose)
+        with open(log_file, "w") as f:
+            f.write(stdout_text)
+        csv_exists     = os.path.exists(csv_file)
+        success_signal = "Finished!" in stdout_text or "csv generated successfully" in stdout_text or csv_exists
+        if (process.returncode != 0 and process.returncode is not None) or "1e+50" in stdout_text or not success_signal:
             return None
+        return _parse_destiny_output(stdout_text, csv_file)
 
-    # first attempt - use all force commands from inverse designer 
-    result = _attempt(free_mat=False)
+    def _archive(suffix):
+        """Copy current cell/cfg/log to a suffixed backup before overwriting."""
+        for ext in (".cell", ".cfg", ".log"):
+            src = f"{prefix}{ext}"
+            if os.path.exists(src):
+                shutil.copy(src, f"{prefix}_{suffix}{ext}")
+
+    # Tier 1: force everything (bank + mat)
+    result = _attempt(free_mat=False, free_bank=False)
     if result is not None:
         return result
 
-    # fallback: strip -ForceMat/-ForceTagMat so DESTINY's BIGFOR loop freely selects
-    # numRowSubarray, numColSubarray, numActiveSubarrayPerRow/Col.
-    # -ForceBank, -ForceTagBank, and all -ForceMux*/-ForceTagMux* lines are preserved.
-    print(f"  [warn] DESTINY validation failed with forced mat structure; "
-          f"retrying with free subarray selection (fallback).")
-    result = _attempt(free_mat=True)
+    # Tier 2: free mat, keep bank forced
+    print(f"  [warn] DESTINY tier-1 (forced bank+mat) failed; retrying with free mat (tier 2).")
+    _archive("tier1")
+    result = _attempt(free_mat=True, free_bank=False)
     if result is not None:
         result["_used_fallback_mat"] = True
+        return result
+
+    # Tier 3: free bank, keep mat forced
+    print(f"  [warn] DESTINY tier-2 (free mat) failed; retrying with free bank (tier 3).")
+    _archive("tier2")
+    result = _attempt(free_mat=False, free_bank=True)
+    if result is not None:
+        result["_used_fallback_bank"] = True
+        return result
+
+    # Tier 4: free both bank and mat
+    print(f"  [warn] DESTINY tier-3 (free bank) failed; retrying with free bank+mat (tier 4).")
+    _archive("tier3")
+    result = _attempt(free_mat=True, free_bank=True)
+    if result is not None:
+        result["_used_fallback_mat"] = True
+        result["_used_fallback_bank"] = True
     return result
 
 def row_to_context(row, roadmap):
@@ -241,6 +303,7 @@ def row_to_context(row, roadmap):
     ctx["_wp"]   = float(row.get("CellInput_SRAMCellPMOSWidth (F)", 2.0))
     ctx["_wac"]  = float(row.get("CellInput_AccessCMOSWidth (F)",   2.5))
     ctx["_read_voltage"] = float(row.get("CellInput_ReadVoltage (V)", 1.0))
+    ctx["_cell_aspect_ratio"] = float(row.get("CellInput_CellAspectRatio", 1.4600))
     ctx["_temp"] = int(row.get("temperature_K", 350))
     
     if hasattr(row, "index") and "opt_target" in row.index: ctx["_opt_target"] = str(row["opt_target"])
@@ -334,12 +397,13 @@ def _run_optimization_sweep(target_vectors, ppa_data_frame, sizing_optimizer, ar
         rec = {
             "is_original": False, "target_idx": i, "node_nm": int(row["process_node_nm"]), "device_roadmap": args.roadmap, "method": args.method,
             "orig_capacity_kb": row.get("capacity_kb"), "orig_word_width_bits": row.get("word_width_bits"), "orig_associativity": row.get("associativity"), "orig_data_stacked_die_count": row.get("data_stacked_die_count"),
-            **{f"orig_{k}": row.get(k) for k in BENCHING_LAYOUT_COLS}, "orig_wn": ctx["_wn"], "orig_wp": ctx["_wp"], "orig_wac": ctx["_wac"], "orig_rv": ctx["_read_voltage"],
-            "capacity_kb": snapped_design_params.get("capacity_kb"), "word_width_bits": snapped_design_params.get("word_width_bits"), "associativity": snapped_design_params.get("associativity"), "data_stacked_die_count": snapped_design_params.get("data_stacked_die_count"),
-            **{k: snapped_design_params.get(k) for k in BENCHING_LAYOUT_COLS},
-            "opt_wn": snapped_design_params.get("CellInput_SRAMCellNMOSWidth (F)", ctx["_wn"]), "opt_wp": snapped_design_params.get("CellInput_SRAMCellPMOSWidth (F)", ctx["_wp"]), "opt_wac": snapped_design_params.get("CellInput_AccessCMOSWidth (F)", ctx["_wac"]), "opt_rv": snapped_design_params.get("CellInput_ReadVoltage (V)", ctx["_read_voltage"]),
-            "_wn": snapped_design_params.get("CellInput_SRAMCellNMOSWidth (F)", ctx["_wn"]), "_wp": snapped_design_params.get("CellInput_SRAMCellPMOSWidth (F)", ctx["_wp"]), "_wac": snapped_design_params.get("CellInput_AccessCMOSWidth (F)", ctx["_wac"]), "_read_voltage": snapped_design_params.get("CellInput_ReadVoltage (V)", ctx["_read_voltage"]),
+            **{f"orig_{k}": row.get(k) for k in BENCHING_LAYOUT_COLS}, "orig_wn": ctx["_wn"], "orig_wp": ctx["_wp"], "orig_wac": ctx["_wac"], "orig_rv": ctx["_read_voltage"], "orig_ar": ctx["_cell_aspect_ratio"],
+            "capacity_kb": snapped_design_params.get("capacity_kb", row.get("capacity_kb")), "word_width_bits": snapped_design_params.get("word_width_bits", row.get("word_width_bits")), "associativity": snapped_design_params.get("associativity", row.get("associativity")), "data_stacked_die_count": snapped_design_params.get("data_stacked_die_count", row.get("data_stacked_die_count")),
+            **{k: snapped_design_params.get(k, row.get(k)) for k in BENCHING_LAYOUT_COLS},
+            "opt_wn": snapped_design_params.get("CellInput_SRAMCellNMOSWidth (F)", ctx["_wn"]), "opt_wp": snapped_design_params.get("CellInput_SRAMCellPMOSWidth (F)", ctx["_wp"]), "opt_wac": snapped_design_params.get("CellInput_AccessCMOSWidth (F)", ctx["_wac"]), "opt_rv": snapped_design_params.get("CellInput_ReadVoltage (V)", ctx["_read_voltage"]), "opt_ar": snapped_design_params.get("CellInput_CellAspectRatio", ctx["_cell_aspect_ratio"]),
+            "_wn": snapped_design_params.get("CellInput_SRAMCellNMOSWidth (F)", ctx["_wn"]), "_wp": snapped_design_params.get("CellInput_SRAMCellPMOSWidth (F)", ctx["_wp"]), "_wac": snapped_design_params.get("CellInput_AccessCMOSWidth (F)", ctx["_wac"]), "_read_voltage": snapped_design_params.get("CellInput_ReadVoltage (V)", ctx["_read_voltage"]), "_cell_aspect_ratio": snapped_design_params.get("CellInput_CellAspectRatio", ctx["_cell_aspect_ratio"]),
             "_temp": SRAM_TEMPERATURE_MAP.get(snapped_design_params.get("data_stacked_die_count", 1), ctx["_temp"]),
+            "variant_name": row.get("variant_name"),
         }
         
         surr_errs, snap_errs = [], []
@@ -366,8 +430,16 @@ def _run_optimization_sweep(target_vectors, ppa_data_frame, sizing_optimizer, ar
         for k in args.metrics:
             rec[f"destiny_{k}"] = None
             rec[f"destiny_err_{k}_pct"] = None
+            rec[f"orig_destiny_{k}"] = None
+            rec[f"orig_destiny_err_{k}_pct"] = None
         rec["destiny_mean_abs_err_pct"] = None
         rec["destiny_used_fallback_mat"] = None
+        rec["destiny_used_fallback_bank"] = None
+        rec["destiny_used_fallback"] = None
+        rec["orig_destiny_mean_abs_err_pct"] = None
+        rec["orig_destiny_used_fallback_mat"] = None
+        rec["orig_destiny_used_fallback_bank"] = None
+        rec["orig_destiny_used_fallback"] = None
  
         for k, v in pre_snap.items(): rec[f"pre_snap_{k}"] = v
         ppa_results_records.append(rec)
@@ -378,7 +450,7 @@ def _run_optimization_sweep(target_vectors, ppa_data_frame, sizing_optimizer, ar
               
     return pd.DataFrame(ppa_results_records)
 
-def _validate_top_designs(ppa_results, n_validate, args):
+def _validate_top_designs(ppa_results, n_validate, args, work_dir):
     """Executes physical verification loop for top layout solutions."""
     if n_validate <= 0:
         print("\n[4/5] Skipping physical validator DESTINY validation runs (--validate-top 0)\n")
@@ -388,18 +460,24 @@ def _validate_top_designs(ppa_results, n_validate, args):
     for rank, ri in enumerate(ppa_results["post_snap_surr_mean_abs_err_pct"].sort_values().head(n_validate).index, 1):
         row = ppa_results.loc[ri]
         
+        print(f"  [rank {rank}] variant_name={row.get('variant_name', 'N/A')}")
+        
         # 1. Run validation on the optimized configuration
         layout_config = _layout_from_row(row)
-        opt_prefix = os.path.join(args.output_dir, f"rank{rank}_opt")
+        opt_prefix = os.path.join(work_dir, f"rank{rank}_opt")
         destiny_ppa = validate_and_capture(
             tech=args.tech, cap_kb=int(row.capacity_kb), ww=int(row.word_width_bits),
             assoc=int(row.associativity), stack=max(1, int(row.data_stacked_die_count)),
-            temp=int(row["_temp"]), wn=float(row["_wn"]), wp=float(row["_wp"]), wac=float(row["_wac"]), read_voltage=float(row["_read_voltage"]),
+            temp=int(row["_temp"]), wn=float(row["_wn"]), wp=float(row["_wp"]), wac=float(row["_wac"]), read_voltage=float(row["_read_voltage"]), cell_aspect_ratio=float(row["_cell_aspect_ratio"]),
             node=int(row.get("node_nm", args.node)), roadmap=args.roadmap, timeout=args.destiny_timeout, verbose=args.verbose_destiny, opt_target="ReadLatency",
             layout_config=layout_config, prefix=opt_prefix
         )
         if destiny_ppa is not None:
-            ppa_results.at[ri, "destiny_used_fallback_mat"] = destiny_ppa.get("_used_fallback_mat", False)
+            fb_mat = destiny_ppa.get("_used_fallback_mat", False)
+            fb_bank = destiny_ppa.get("_used_fallback_bank", False)
+            ppa_results.at[ri, "destiny_used_fallback_mat"] = fb_mat
+            ppa_results.at[ri, "destiny_used_fallback_bank"] = fb_bank
+            ppa_results.at[ri, "destiny_used_fallback"] = fb_mat or fb_bank
 
             dest_errs = []
             for k in args.metrics:
@@ -418,20 +496,24 @@ def _validate_top_designs(ppa_results, n_validate, args):
 
         # 2. Run validation on the original configuration
         orig_layout_config = _layout_from_row(row, prefix="orig_")
-        orig_prefix = os.path.join(args.output_dir, f"rank{rank}_orig")
+        orig_prefix = os.path.join(work_dir, f"rank{rank}_orig")
         
         orig_temp = int(SRAM_TEMPERATURE_MAP.get(max(1, int(row.orig_data_stacked_die_count)), 350))
         
         orig_destiny_ppa = validate_and_capture(
             tech=args.tech, cap_kb=int(row.orig_capacity_kb), ww=int(row.orig_word_width_bits),
             assoc=int(row.orig_associativity), stack=max(1, int(row.orig_data_stacked_die_count)),
-            temp=orig_temp, wn=float(row.orig_wn), wp=float(row.orig_wp), wac=float(row.orig_wac), read_voltage=float(row.orig_rv),
+            temp=orig_temp, wn=float(row.orig_wn), wp=float(row.orig_wp), wac=float(row.orig_wac), read_voltage=float(row.orig_rv), cell_aspect_ratio=float(row.orig_ar),
             node=int(row.get("node_nm", args.node)), roadmap=args.roadmap, timeout=args.destiny_timeout, verbose=args.verbose_destiny, opt_target="ReadLatency",
             layout_config=orig_layout_config, prefix=orig_prefix
         )
 
         if orig_destiny_ppa is not None:
-            ppa_results.at[ri, "orig_destiny_used_fallback_mat"] = orig_destiny_ppa.get("_used_fallback_mat", False)
+            orig_fb_mat = orig_destiny_ppa.get("_used_fallback_mat", False)
+            orig_fb_bank = orig_destiny_ppa.get("_used_fallback_bank", False)
+            ppa_results.at[ri, "orig_destiny_used_fallback_mat"] = orig_fb_mat
+            ppa_results.at[ri, "orig_destiny_used_fallback_bank"] = orig_fb_bank
+            ppa_results.at[ri, "orig_destiny_used_fallback"] = orig_fb_mat or orig_fb_bank
 
             orig_dest_errs = []
             for k in args.metrics:
@@ -520,32 +602,149 @@ def _compute_and_report_trend_rank(args):
         print(sub_df.to_string(index=False))
     print("=" * 80 + "\n")
 
-def _plot_results_side_effect(ppa_results, ppa_data_frame, target_vectors, args):
-    """Plots optimized and verified design points against the Pareto background frontier of the cache design space library."""
-    # Sizing and plotting variables:
-    # - args.metrics: Active target objectives representing PPA properties (ns, mW, mm², nJ)
-    # - capacity_kb: Library background memory capacity dimension (KB) acting as a color map norm scale
-    if len(args.metrics) < 2: return
-    x_col, y_col = args.metrics[0], args.metrics[1]
-    fig, ax = plt.subplots(figsize=(8, 5.5), constrained_layout=True)
-    norm, _ = cap_colormap(ppa_data_frame["capacity_kb"])
-    
-    ax.scatter(ppa_data_frame[x_col], ppa_data_frame[y_col], c=ppa_data_frame["capacity_kb"], norm=norm, cmap=plt.cm.viridis, s=12, alpha=0.1, linewidths=0, zorder=1, label="Library Background")
-    ax.scatter(target_vectors[x_col], target_vectors[y_col], facecolors="none", s=45, marker="o", edgecolors="k", linewidths=1.0, zorder=2, label="PPA Targets")
-    
-    mask_snap = ppa_results[f"post_snap_surr_{x_col}"].notna() & ppa_results[f"post_snap_surr_{y_col}"].notna()
-    if mask_snap.any(): ax.scatter(ppa_results.loc[mask_snap, f"post_snap_surr_{x_col}"], ppa_results.loc[mask_snap, f"post_snap_surr_{y_col}"], c="#ffa657", s=50, marker="x", zorder=3, label="Snapped Surrogate Prediction")
-        
-    mask_dest = ppa_results[f"destiny_{x_col}"].notna() & ppa_results[f"destiny_{y_col}"].notna()
-    if mask_dest.any(): ax.scatter(ppa_results.loc[mask_dest, f"destiny_{x_col}"], ppa_results.loc[mask_dest, f"destiny_{y_col}"], c="#3fb950", s=70, marker="*", edgecolors="k", linewidths=0.5, zorder=4, label="Physical DESTINY Solver Validation")
+def _plot_results_side_effect(ppa_results, ppa_data_frame, target_vectors, args, plots_dir):
+    """Two-panel plot:
+    Left  — 2D scatter of first two metrics against the library Pareto background.
+    Right — per-metric bar chart showing surrogate vs DESTINY % error relative to
+            the target for every active metric, one bar group per result row.
+    """
+    if len(args.metrics) < 2:
+        return
 
-    ax.set_xscale("log"); ax.set_yscale("log")
-    ax.set_xlabel(METRIC_META[x_col]["label"]); ax.set_ylabel(METRIC_META[y_col]["label"])
+    has_destiny = (
+        "destiny_mean_abs_err_pct" in ppa_results.columns
+        and ppa_results["destiny_mean_abs_err_pct"].notna().any()
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5.5), constrained_layout=True)
+
+    # ── Left: 2D scatter (first two metrics) ─────────────────────────────────
+    ax = axes[0]
+    x_col, y_col = args.metrics[0], args.metrics[1]
+    norm, _ = cap_colormap(ppa_data_frame["capacity_kb"])
+
+    ax.scatter(
+        ppa_data_frame[x_col], ppa_data_frame[y_col],
+        c=ppa_data_frame["capacity_kb"], norm=norm, cmap=plt.cm.viridis,
+        s=12, alpha=0.1, linewidths=0, zorder=1, label="Library Background"
+    )
+    ax.scatter(
+        target_vectors[x_col], target_vectors[y_col],
+        facecolors="none", s=45, marker="o", edgecolors="k",
+        linewidths=1.0, zorder=2, label="PPA Targets"
+    )
+
+    mask_snap = (
+        ppa_results[f"post_snap_surr_{x_col}"].notna()
+        & ppa_results[f"post_snap_surr_{y_col}"].notna()
+    )
+    if mask_snap.any():
+        ax.scatter(
+            ppa_results.loc[mask_snap, f"post_snap_surr_{x_col}"],
+            ppa_results.loc[mask_snap, f"post_snap_surr_{y_col}"],
+            c="#ffa657", s=50, marker="x", zorder=3, label="Snapped Surrogate"
+        )
+
+    mask_dest = (
+        ppa_results[f"destiny_{x_col}"].notna()
+        & ppa_results[f"destiny_{y_col}"].notna()
+    )
+    if mask_dest.any():
+        ax.scatter(
+            ppa_results.loc[mask_dest, f"destiny_{x_col}"],
+            ppa_results.loc[mask_dest, f"destiny_{y_col}"],
+            c="#3fb950", s=70, marker="*", edgecolors="k",
+            linewidths=0.5, zorder=4, label="DESTINY Physical"
+        )
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel(METRIC_META[x_col]["label"])
+    ax.set_ylabel(METRIC_META[y_col]["label"])
     format_log_axis(ax, axis="both")
-    
-    ax.set_title(f"Design Optimizations and validation Paths ({args.method})\n{args.tech} | {args.node}nm | {args.roadmap}", fontsize=11, fontweight="bold")
-    ax.grid(True, which="both", alpha=0.25); ax.legend(loc="lower right", fontsize=8.5); add_cap_colorbar(fig, [ax], norm)
-    fig.savefig(os.path.join(args.output_dir, f"benchmark_trajectory_{args.tech}_{args.node}nm_{args.roadmap}_{args.method}.png"), dpi=200, bbox_inches="tight")
+    ax.set_title("Inverse Design vs Pareto Points", fontsize=10, fontweight="bold")
+    ax.grid(True, which="both", alpha=0.25)
+    ax.legend(loc="lower right", fontsize=8)
+    add_cap_colorbar(fig, [ax], norm)
+
+    # ── Right: per-metric % error bar chart ───────────────────────────────────
+    # For each result row that has a target, show surrogate error and (if available)
+    # DESTINY error as grouped bars. One group per metric, one bar per result row.
+    ax2 = axes[1]
+
+    n_metrics = len(args.metrics)
+    n_rows = len(ppa_results)
+    group_width = 0.7
+    bar_width = group_width / (2 if has_destiny else 1) / n_rows
+    x_pos = np.arange(n_metrics)
+
+    colors_surr = plt.cm.Blues(np.linspace(0.4, 0.85, n_rows))
+    colors_dest = plt.cm.Greens(np.linspace(0.4, 0.85, n_rows))
+
+    for row_idx, (_, row) in enumerate(ppa_results.iterrows()):
+        surr_errs = []
+        dest_errs = []
+        for m in args.metrics:
+            target_val = row.get(f"target_{m}", np.nan)
+            surr_val   = row.get(f"post_snap_surr_{m}", np.nan)
+            dest_val   = row.get(f"destiny_{m}", np.nan)
+
+            surr_errs.append(
+                pct_err(surr_val, target_val)
+                if pd.notna(target_val) and pd.notna(surr_val) else np.nan
+            )
+            dest_errs.append(
+                pct_err(dest_val, target_val)
+                if has_destiny and pd.notna(target_val) and pd.notna(dest_val) else np.nan
+            )
+
+        # Surrogate bars
+        offset_surr = (row_idx - n_rows / 2 + 0.25) * bar_width * (2 if has_destiny else 1)
+        bars = ax2.bar(
+            x_pos + offset_surr, surr_errs,
+            width=bar_width, color=colors_surr[row_idx],
+            label=f"Surrogate row {row_idx}" if row_idx == 0 else "_nolegend_",
+            alpha=0.85, edgecolor="none"
+        )
+
+        # DESTINY bars
+        if has_destiny:
+            offset_dest = offset_surr + bar_width
+            ax2.bar(
+                x_pos + offset_dest, dest_errs,
+                width=bar_width, color=colors_dest[row_idx],
+                label=f"DESTINY row {row_idx}" if row_idx == 0 else "_nolegend_",
+                alpha=0.85, edgecolor="none"
+            )
+
+    ax2.axhline(0, color="k", linewidth=0.8, linestyle="--")
+    ax2.set_xticks(x_pos)
+    ax2.set_xticklabels(
+        [METRIC_META[m]["label"] if m in METRIC_META else m for m in args.metrics],
+        rotation=30, ha="right", fontsize=8
+    )
+    ax2.set_ylabel("% Error vs Target")
+    ax2.set_title("Per-Metric Surrogate vs DESTINY Error", fontsize=10, fontweight="bold")
+    ax2.grid(True, axis="y", alpha=0.25)
+
+    # Manual legend for surrogate vs destiny distinction
+    from matplotlib.patches import Patch
+    legend_elements = [Patch(facecolor="#4c9be8", label="Snapped Surrogate")]
+    if has_destiny:
+        legend_elements.append(Patch(facecolor="#3fb950", label="DESTINY Physical"))
+    ax2.legend(handles=legend_elements, fontsize=8, loc="upper right")
+
+    fig.suptitle(
+        f"{args.tech} | {args.node}nm | {args.roadmap} | method={args.method}",
+        fontsize=11, fontweight="bold"
+    )
+    fig.savefig(
+        os.path.join(
+            plots_dir,
+            f"benchmark_trajectory_{args.tech}_{args.node}nm_{args.roadmap}_{args.method}.png"
+        ),
+        dpi=200, bbox_inches="tight"
+    )
     plt.close(fig)
 
 def main():
@@ -566,7 +765,18 @@ def main():
     if args.metrics is None:
         args.metrics = get_active_targets(args.tech)
 
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    work_dir = os.path.join(args.output_dir, "destiny_files", timestamp)
+    plots_dir = os.path.join(args.output_dir, "validation_plots")
+
     os.makedirs(args.output_dir, exist_ok=True)
+    os.makedirs(work_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+
+    print(f"Output dir    : {args.output_dir}")
+    print(f"Plots dir     : {plots_dir}")
+    print(f"DESTINY files : {work_dir}")
+
     data_csv = os.path.join("pareto", args.tech, f"{args.tech}_pareto.csv")
 
     # Silently drop any metrics that are structurally zero for this technology.
@@ -597,14 +807,14 @@ def main():
     print(f"\n[3/5] Solving layouts across {len(target_vectors)} target PPA metrics...")
     ppa_results = _run_optimization_sweep(target_vectors, ppa_data_frame, sizing_optimizer, args)
 
-    ppa_results = _validate_top_designs(ppa_results, min(args.validate_top, len(ppa_results)), args)
+    ppa_results = _validate_top_designs(ppa_results, min(args.validate_top, len(ppa_results)), args, work_dir)
 
     csv_path = os.path.join(args.output_dir, f"benchmark_pareto_{args.tech}_{args.node}nm_{args.roadmap}_{args.method}.csv")
     ppa_results[[c for c in ppa_results.columns if not c.startswith("_")]].to_csv(csv_path, index=False)
     print(f"[5/5] Sized results successfully logged -> {csv_path}")
 
     _compute_and_report_trend_rank(args)
-    _plot_results_side_effect(ppa_results, ppa_data_frame, target_vectors, args)
+    _plot_results_side_effect(ppa_results, ppa_data_frame, target_vectors, args, plots_dir)
 
 if __name__ == "__main__":
     main()

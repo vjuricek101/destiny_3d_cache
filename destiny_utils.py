@@ -72,6 +72,148 @@ def get_active_short_labels(tech: str) -> List[str]:
     skip = set(TECH_SKIP_TARGETS.get(tech, []))
     return [lbl for col, lbl in zip(TARGET_COLS, TARGET_SHORT_LABELS) if col not in skip]
 
+
+def build_fixed_context(
+    node: int,
+    roadmap: str,
+    temperature: float,
+    **fixed_params,
+) -> Dict[str, Any]:
+    """Build the ``fixed_context`` dict passed to every inverse-design optimizer.
+    """
+    ctx: Dict[str, Any] = {
+        f"process_node_nm_{node}":   1.0,
+        f"device_roadmap_{roadmap}": 1.0,
+        "temperature_K":              temperature,
+    }
+    ctx.update({k: v for k, v in fixed_params.items() if v is not None})
+    return ctx
+
+
+# -- Inverse Design Constants & Vocabs ------------------------------
+import torch
+
+_MUX_VALID = [1, 2, 4, 8, 16, 32, 64]
+_MAT_VALID = [1, 2, 4, 8, 16]
+
+BASE_ARCH_COLS   = ["capacity_kb", "word_width_bits", "associativity", "data_stacked_die_count"]
+BASE_ARCH_BOUNDS = [
+    (math.log10(2),  math.log10(32768)),  # capacity_kb  (log10)
+    (6.0,            11.0),               # word_width    (log2)
+    (0.0,            6.0),                # associativity (log2)
+    (0.0,            4.0),                # stacked_die   (log2)
+]
+
+DATA_PARAM_BOUNDS_LOG2 = {
+    "data_mux_sense_amp":           (0.0, 6.0),
+    "data_mux_output_lev1":         (0.0, 6.0),
+    "data_mux_output_lev2":         (0.0, 6.0),
+    "data_num_active_mat_per_row":  (0.0, 4.0),
+    "data_num_active_mat_per_col":  (0.0, 4.0),
+    "tag_num_row_mat":              (0.0, 6.0),
+    "tag_num_col_mat":              (0.0, 6.0),
+    "tag_mux_sense_amp":            (0.0, 6.0),
+    "tag_mux_output_lev1":          (0.0, 6.0),
+    "tag_mux_output_lev2":          (0.0, 6.0),
+    "tag_num_active_mat_per_row":   (0.0, 6.0),
+    "tag_num_active_mat_per_col":   (0.0, 6.0),
+}
+DATA_PARAM_BOUNDS_LINEAR = {
+    "data_num_active_subarray_per_row": (1.0, 2.0),
+    "data_num_active_subarray_per_col": (1.0, 2.0),
+    "tag_num_active_subarray_per_row":  (1.0, 2.0),
+    "tag_num_active_subarray_per_col":  (1.0, 2.0),
+    "CellInput_CellAspectRatio":        (0.8, 2.5),
+}
+SRAM_CELL_BOUNDS_LOG10 = {
+    "CellInput_SRAMCellNMOSWidth (F)": (2.2, 2.5),
+    "CellInput_SRAMCellPMOSWidth (F)": (1.0, 1.1),
+    "CellInput_AccessCMOSWidth (F)":   (1.1, 1.25),
+}
+SRAM_CELL_BOUNDS_LINEAR = {
+    "CellInput_ReadVoltage (V)": (0.5, 1.2),
+}
+
+_CAP_KB_PHYS = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+_WW_PHYS     = [64, 128, 256, 512, 1024, 2048]   # 2^6 … 2^11
+_ASSOC_PHYS  = [1, 2, 4, 8, 16, 32, 64]          # 2^0 … 2^6
+_DIE_PHYS    = [1, 2, 4, 8, 16]                  # 2^0 … 2^4
+
+def _log10_vocab(phys_values):
+    return torch.tensor([math.log10(v) for v in phys_values], dtype=torch.float32)
+
+def _log2_vocab(phys_values):
+    return torch.tensor([math.log2(v) for v in phys_values], dtype=torch.float32)
+
+def _linear_grid(lo, hi, step):
+    n = max(2, round((hi - lo) / step) + 1)
+    vals = [lo + i * step for i in range(n)]
+    vals[-1] = hi
+    return torch.tensor(vals, dtype=torch.float32)
+
+def build_gumbel_vocabs(opt_cols: list, tech: str) -> dict:
+    vocabs = {}
+    for col in opt_cols:
+        if col == "capacity_kb":
+            vocabs[col] = _log10_vocab(_CAP_KB_PHYS)
+        elif col == "word_width_bits":
+            vocabs[col] = _log2_vocab(_WW_PHYS)
+        elif col == "associativity":
+            vocabs[col] = _log2_vocab(_ASSOC_PHYS)
+        elif col == "data_stacked_die_count":
+            vocabs[col] = _log2_vocab(_DIE_PHYS)
+        elif "mux_" in col:
+            vocabs[col] = _log2_vocab(_MUX_VALID)
+        elif "_mat_" in col or "num_row_mat" in col or "num_col_mat" in col:
+            vocabs[col] = _log2_vocab(_MAT_VALID)
+        elif "_subarray_" in col:
+            vocabs[col] = torch.tensor([1.0, 2.0], dtype=torch.float32)
+        elif tech == "SRAM" and col in SRAM_CELL_BOUNDS_LOG10:
+            lo_phys, hi_phys = SRAM_CELL_BOUNDS_LOG10[col]
+            vocabs[col] = _linear_grid(math.log10(lo_phys), math.log10(hi_phys), step=0.01)
+        elif tech == "SRAM" and col in SRAM_CELL_BOUNDS_LINEAR:
+            lo, hi = SRAM_CELL_BOUNDS_LINEAR[col]
+            vocabs[col] = _linear_grid(lo, hi, step=0.05)
+        else:
+            vocabs[col] = torch.tensor([0.0, 1.0], dtype=torch.float32)
+    return vocabs
+
+def build_dyn_idx(feature_cols, opt_cols, opt_cats=None, cat_vocabs=None):
+    dyn_keys = set(opt_cols) | {
+        "derived_sqrt_capacity", "derived_cap_per_die", "derived_rows_per_die",
+        "CellInput_CellArea (F^2)", "derived_sqrt_area", "derived_read_v_sq",
+        "CellInput_MinSenseVoltage (mV)",
+    } | {f"device_roadmap_{rm}_x_log10_cap" for rm in ["HP", "LOP", "LSTP"]}
+
+    if opt_cats and cat_vocabs:
+        for cat in opt_cats:
+            for val in cat_vocabs[cat]:
+                dyn_keys.add(f"{cat}_{val}")
+
+    return {k: i for i, k in enumerate(feature_cols) if k in dyn_keys}
+
+def nearest_valid(val: float, valid_set: list) -> float:
+    return min(valid_set, key=lambda x: abs(x - val))
+
+
+
+def parse_fixed_arg(s: str):
+    """Parse a single ``KEY=VALUE`` string into a ``(key, value)`` pair.
+    """
+    import argparse as _ap
+    k, sep, v = s.partition("=")
+    if not sep:
+        raise _ap.ArgumentTypeError(
+            f"Expected KEY=VALUE (e.g. capacity_kb=64), got: {s!r}"
+        )
+    k = k.strip()
+    for coerce in (int, float):
+        try:
+            return k, coerce(v)
+        except ValueError:
+            pass
+    return k, v.strip()
+
 METRIC_META: Dict[str, Dict[str, str]] = {
     "cache_area_mm2":         {"label": "Area (mm2)",          "unit": "mm2"},
     "cache_hit_latency_ns":   {"label": "Read Latency (ns)",  "unit": "ns"},

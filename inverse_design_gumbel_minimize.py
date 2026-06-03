@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-inverse_design_gumbel.py — ST Gumbel-Softmax inverse design optimizer.
+inverse_design_gumbel_minimize.py — ST Gumbel-Softmax inverse design optimizer (minimize variant).
 
 Each architectural parameter is a categorical variable over an explicit discrete
 vocabulary.  During the inner loop:
@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 from train_model import PPA_MLP, CATEGORICAL_COLS
 import sys
+from typing import Optional
 from destiny_utils import (
     TARGET_COLS as TARGET_KEYS,
     TARGET_SHORT_LABELS,
@@ -78,9 +79,6 @@ def _anneal_tau(step: int, total_steps: int) -> float:
     frac    = step / (total_steps - 1)
     log_tau = (1.0 - frac) * math.log(GUMBEL_TAU_START) + frac * math.log(GUMBEL_TAU_END)
     return float(math.exp(log_tau))
-
-
-
 
 
 def _update_sram_cell_features(x, dyn_idx, encoded_vals_dict, fixed_context, device):
@@ -145,18 +143,22 @@ def _snap_design_gumbel(vocabs: dict, logits_dict: dict) -> dict:
 
 # ── Optimizer ─────────────────────────────────────────────────────────────────
 
-class InverseOptimizerGumbel:
-    """Inverse design optimizer using Straight-Through Gumbel-Softmax.
+class InverseOptimizerGumbelMinimize:
+    """Inverse design optimizer using Straight-Through Gumbel-Softmax (minimize variant).
 
-    Public interface is identical to InverseOptimizerSTE:
+    Instead of matching target values, this optimizer directly minimises the sum of
+    log10-predicted values for a requested set of objectives.  The caller supplies
+    a list of metric names; no target magnitudes are needed.
+
     optimize() returns (design, ppa_dict, pre_snap, snapped_ppa_dict).
     """
 
-    def __init__(self, tech: str):
+    def __init__(self, tech: str, model_dir: Optional[str] = None):
         self.tech   = tech
         self.device = torch.device("cpu")
 
-        model_dir = f"model_output/{tech.lower()}_feasibility"
+        if model_dir is None:
+            model_dir = f"model_output/{tech.lower()}_feasibility"
 
         with open(os.path.join(model_dir, "feature_cols.json")) as f:
             self.feature_cols = json.load(f)
@@ -220,15 +222,6 @@ class InverseOptimizerGumbel:
                     vals.append(feat[len(prefix):])
             if len(vals) > 1:
                 self.categorical_vocabs[cat] = vals
-
-    def _target_tensors(self, targets):
-        """Return (log10 target values, binary weight mask) aligned to the model output head."""
-        vals    = [targets.get(k, 1.0) for k in self._active_keys]
-        weights = [1.0 if k in targets else 0.0 for k in self._active_keys]
-        return (
-            torch.tensor(np.log10(np.clip(vals, 1e-12, None)), dtype=torch.float32, device=self.device),
-            torch.tensor(weights, dtype=torch.float32, device=self.device),
-        )
 
     def _build_feature_vector(
         self,
@@ -299,23 +292,30 @@ class InverseOptimizerGumbel:
 
     def optimize(
         self,
-        targets: dict,
+        objectives: list,        # e.g. ["cache_hit_latency_ns", "cache_hit_energy_nJ"]
         fixed_context: dict,
         steps: int = 300,
         n_restarts: int = 4,
-        target_weights=None,
+        objective_weights=None,  # optional list/dict of per-objective weights for Pareto attenuation
         verbose: bool = False,
     ):
-        """ST Gumbel-Softmax gradient-based inverse design with multi-start.
+        """ST Gumbel-Softmax gradient-based inverse design with multi-start (minimize variant).
 
         Parameters
         ----------
-        targets        : {metric_key: target_physical_value}
-        fixed_context  : {col: value} — columns pinned and not optimised
-        steps          : gradient steps per restart
-        n_restarts     : number of random restarts
-        target_weights : optional override for per-metric loss weights
-        verbose        : if True, print per-parameter table at the end
+        objectives        : list of metric keys to minimise (must be active for this tech)
+        fixed_context     : {col: value} — columns pinned and not optimised.
+                            Pass ``"capacity_kb": <int>`` here to fix capacity instead of
+                            optimizing it (strongly recommended to prevent collapse to 2 KB).
+        steps             : gradient steps per restart
+        n_restarts        : number of random restarts
+        objective_weights : optional per-objective weights that control which region of the
+                            Pareto frontier is favoured.  Can be:
+                              - a list of floats, one per entry in *objectives*
+                              - a dict {metric_key: float}
+                            Larger weights push the optimizer harder toward minimizing that
+                            metric.  Defaults to equal weight (1.0) for all objectives.
+        verbose           : if True, print per-parameter table at the end
 
         Returns
         -------
@@ -334,14 +334,31 @@ class InverseOptimizerGumbel:
 
         vocabs = {k: v.to(self.device) for k, v in build_gumbel_vocabs(self.opt_cols, self.tech).items()}
 
-        t_tensor, w_tensor = self._target_tensors(targets)
-        if target_weights is not None:
-            if isinstance(target_weights, dict):
-                w_tensor = torch.tensor(
-                    [target_weights.get(k, 1.0 if k in targets else 0.0) for k in TARGET_KEYS],
-                    dtype=torch.float32, device=self.device)
-            else:
-                w_tensor = torch.tensor(target_weights, dtype=torch.float32, device=self.device)
+        # Map each requested metric to its index in the model output head.
+        # Raises KeyError immediately if a metric is not active for this tech,
+        # rather than silently producing wrong gradients.
+        obj_indices = []
+        for k in objectives:
+            if k not in self._active_keys:
+                raise KeyError(
+                    f"Metric '{k}' is not active for tech={self.tech}. "
+                    f"Active metrics: {self._active_keys}"
+                )
+            obj_indices.append(self._active_keys.index(k))
+        obj_indices_t = torch.tensor(obj_indices, dtype=torch.long, device=self.device)
+
+        # Per-objective weights for Pareto attenuation.
+        if objective_weights is None:
+            obj_w = torch.ones(len(objectives), dtype=torch.float32, device=self.device)
+        elif isinstance(objective_weights, dict):
+            obj_w = torch.tensor(
+                [objective_weights.get(k, 1.0) for k in objectives],
+                dtype=torch.float32, device=self.device,
+            )
+        else:
+            obj_w = torch.tensor(objective_weights, dtype=torch.float32, device=self.device)
+        # Normalize so weights sum to len(objectives) — preserves approximate loss scale.
+        obj_w = obj_w * (len(objectives) / obj_w.sum().clamp(min=1e-8))
 
         # If capacity_kb is fixed, pre-compute its encoded value so _build_feature_vector works.
         _cap_fixed = "capacity_kb" in fixed_keys
@@ -394,6 +411,7 @@ class InverseOptimizerGumbel:
                     for cat in self.opt_cats
                 }
 
+                # Use fixed capacity encoding if capacity_kb is pinned in fixed_context.
                 cap_enc = _cap_enc_fixed if _cap_fixed else encoded_vals_dict["capacity_kb"]
                 x       = self._build_feature_vector(
                     base_x, dyn_idx, encoded_vals_dict, self.opt_cols, fixed_context, cap_enc, cat_encoded_dict
@@ -445,7 +463,11 @@ class InverseOptimizerGumbel:
                 
                 partition_penalty = 50.0 * torch.relu(_partition_phys - _ww_phys) / _ww_phys
 
-                loss = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty + partition_penalty
+                # pred shape: [1, n_active_targets], values are log10(physical).
+                # Weighted sum of log10 predictions for the requested objectives.
+                # Weights > 1 push harder toward minimizing that metric (Pareto attenuation).
+                task_loss = (obj_w * pred[0, obj_indices_t]).sum()
+                loss = task_loss + learned_penalty + partition_penalty
                 loss.backward()
                 inner_opt.step()
 
@@ -572,16 +594,19 @@ class InverseOptimizerGumbel:
 # ── CLI entry point ────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="DESTINY Inverse Design Optimizer — ST Gumbel-Softmax")
+    p = argparse.ArgumentParser(description="DESTINY Inverse Design Optimizer — ST Gumbel-Softmax (minimize)")
     p.add_argument("--tech",                   default="SRAM")
-    p.add_argument("--target-read-latency",    type=float, help="Target read latency (ns)")
-    p.add_argument("--target-write-latency",   type=float, help="Target write latency (ns)")
-    p.add_argument("--target-refresh-latency", type=float, help="Target refresh latency (ns)")
-    p.add_argument("--target-area",            type=float, help="Target cache area (mm2)")
-    p.add_argument("--target-hit-energy",      type=float, help="Target hit energy (nJ)")
-    p.add_argument("--target-write-energy",    type=float, help="Target write energy (nJ)")
-    p.add_argument("--target-refresh-energy",  type=float, help="Target refresh energy (nJ)")
-    p.add_argument("--target-leakage",         type=float, help="Target leakage power (mW)")
+    p.add_argument(
+        "--objectives", nargs="+",
+        default=["cache_area_mm2",
+                "cache_hit_latency_ns",
+                "cache_write_latency_ns",
+                "cache_hit_energy_nJ",
+                "cache_write_energy_nJ",
+                "cache_leakage_mW"],
+        choices=list(METRIC_META) if "METRIC_META" in dir() else TARGET_KEYS,
+        help="Metrics to minimize (log10 sum). e.g. --objectives cache_hit_latency_ns cache_hit_energy_nJ"
+    )
     p.add_argument("--node",        type=int, default=32, choices=[22, 32, 45, 65])
     p.add_argument("--roadmap",     default="HP", choices=["HP", "LOP", "LSTP"])
     p.add_argument("--temperature", type=float, default=350.0)
@@ -593,47 +618,59 @@ if __name__ == "__main__":
              "Values are auto-coerced to int, float, or str. "
              "E.g. --fix capacity_kb=64 associativity=8"
     )
-    p.add_argument("--output",      default=None, help="CSV to append results to")
+    p.add_argument(
+        "--objective-weights", type=float, nargs="+", default=None,
+        metavar="W",
+        help="Per-objective weights (one float per --objectives entry). "
+             "Higher weight = optimizer pushes harder on that metric. "
+             "Controls which region of the Pareto frontier is favoured. "
+             "Example: --objective-weights 3.0 1.0  (latency 3x vs energy)"
+    )
+    p.add_argument(
+        "--output", default="runs/results.csv",
+        help="CSV to append optimizer results to (default: runs/results.csv)."
+    )
     p.add_argument("--verbose-opt", action="store_true",
                    help="Print Gumbel argmax / post-snap parameter table")
+    p.add_argument("--model-dir", default=None,
+                   help="Custom path to surrogate model directory (contains model.pt, scaler.pkl, feature_cols.json).")
     args = p.parse_args()
 
-    targets = {k: v for k, v in [
-        ("cache_area_mm2",           args.target_area),
-        ("cache_hit_latency_ns",     args.target_read_latency),
-        ("cache_write_latency_ns",   args.target_write_latency),
-        ("cache_refresh_latency_ns", args.target_refresh_latency),
-        ("cache_hit_energy_nJ",      args.target_hit_energy),
-        ("cache_write_energy_nJ",    args.target_write_energy),
-        ("cache_refresh_energy_nJ",  args.target_refresh_energy),
-        ("cache_leakage_mW",         args.target_leakage),
-    ] if v is not None}
-
-    if not targets:
-        p.error("Specify at least one target via --target-read-latency / --target-area / etc.")
+    if args.objective_weights is not None and \
+            len(args.objective_weights) != len(args.objectives):
+        p.error(
+            f"--objective-weights must have the same number of entries as --objectives "
+            f"(got {len(args.objective_weights)} weights for {len(args.objectives)} objectives)."
+        )
 
     fixed   = dict(args.fix)
     context = build_fixed_context(args.node, args.roadmap, args.temperature, **fixed)
 
-    optimizer = InverseOptimizerGumbel(args.tech)
+    optimizer = InverseOptimizerGumbelMinimize(args.tech, model_dir=args.model_dir)
     design, ppa, pre_snap, snapped_ppa = optimizer.optimize(
-        targets, context,
-        steps=args.steps, n_restarts=args.restarts,
+        objectives=args.objectives,
+        fixed_context=context,
+        steps=args.steps,
+        n_restarts=args.restarts,
+        objective_weights=args.objective_weights,
         verbose=args.verbose_opt,
     )
 
     row = {"tech": args.tech, "node_nm": args.node,
-           "roadmap": args.roadmap, "temperature_K": args.temperature}
+           "roadmap": args.roadmap, "temperature_K": args.temperature,
+           "capacity_kb": fixed.get("capacity_kb")}
     row.update(design)
     row.update({f"pred_{k}": ppa.get(label) for k, label in zip(TARGET_KEYS, TARGET_SHORT_LABELS)})
     row.update({f"post_snap_pred_{k}": snapped_ppa.get(label) for k, label in zip(TARGET_KEYS, TARGET_SHORT_LABELS)})
-    row.update({f"target_{k}": targets.get(k, float("nan")) for k in TARGET_KEYS})
+    row.update({f"objectives": args.objectives})
     row.update({f"pre_snap_{k}": v for k, v in pre_snap.items()})
 
     df_out = pd.DataFrame([row])
     if args.output:
-        df_out.to_csv(args.output, mode="a", index=False,
-                      header=not os.path.exists(args.output))
-        print(f"Result appended to {args.output}", file=sys.stderr)
+        os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
+        already_exists = os.path.exists(args.output)
+        df_out.to_csv(args.output, mode="a", index=False, header=not already_exists)
+        print(f"Result {'appended to' if already_exists else 'written to'} {args.output}",
+              file=sys.stderr)
     else:
         print(df_out.to_csv(index=False), end="")

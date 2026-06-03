@@ -88,7 +88,7 @@ LINEAR_NUMERIC_COLS = [
     "data_num_active_subarray_per_row", "data_num_active_subarray_per_col",
     # Tag active-subarray counts (same treatment as data equivalents)
     "tag_num_active_subarray_per_row", "tag_num_active_subarray_per_col",
-    "CellInput_ReadVoltage (V)",
+    "CellInput_ReadVoltage (V)", "CellInput_CellAspectRatio",
 ]
 
 _NVM_DROPS = [
