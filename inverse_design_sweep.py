@@ -36,6 +36,11 @@ def _map_repeater(val):
     if "No" in v: return "RepeatedNone"
     return v.replace(' ', '')
 
+def _map_wire_type(val):
+    v = str(val).replace(' ', '')
+    v = v.replace('Semi-Global', 'Semi')
+    return v
+
 def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, temp, wn, wp, wac, read_voltage, cell_aspect_ratio, node, roadmap, opt_target, layout_config, free_mat=False, free_bank=False):
     """Writes physical cell parameters and array routing configuration files to invoke DESTINY compiler."""
     cell_params = {"SRAMCellNMOSWidth (F)": wn, "SRAMCellPMOSWidth (F)": wp, "AccessCMOSWidth (F)": wac}
@@ -75,31 +80,39 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
         if layout_config.get("data_mux_output_lev2") is not None:
             cfg_content += f"-ForceMuxOutputLev2: {int(layout_config['data_mux_output_lev2'])}\n"
         if layout_config.get("data_num_active_mat_per_col") is not None and layout_config.get("data_num_active_mat_per_row") is not None and not free_bank:
-            c, r = int(layout_config["data_num_active_mat_per_col"]), int(layout_config["data_num_active_mat_per_row"])
-            cfg_content += f"-ForceBank (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
-        if layout_config.get("data_num_active_subarray_per_col") is not None and layout_config.get("data_num_active_subarray_per_row") is not None and not free_mat:
-            c, r = int(layout_config["data_num_active_subarray_per_col"]), int(layout_config["data_num_active_subarray_per_row"])
-            cfg_content += f"-ForceMat (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
+            A = C = int(layout_config["data_num_active_mat_per_col"])
+            B = D = int(layout_config["data_num_active_mat_per_row"])
+            cfg_content += f"-ForceBank (Total AxB, Active CxD): {A}x{B}, {C}x{D}\n"
+            
+        if layout_config.get("data_num_row_subarray") is not None and layout_config.get("data_num_col_subarray") is not None and not free_mat:
+            A = int(layout_config["data_num_row_subarray"])
+            B = int(layout_config["data_num_col_subarray"])
+            C = int(layout_config.get("data_num_active_subarray_per_col", A))
+            D = int(layout_config.get("data_num_active_subarray_per_row", B))
+            A, B = max(A, C), max(B, D)
+            cfg_content += f"-ForceMat (Total AxB, Active CxD): {A}x{B}, {C}x{D}\n"
+        elif layout_config.get("data_num_active_subarray_per_col") is not None and layout_config.get("data_num_active_subarray_per_row") is not None and not free_mat:
+            A = C = int(layout_config["data_num_active_subarray_per_col"])
+            B = D = int(layout_config["data_num_active_subarray_per_row"])
+            cfg_content += f"-ForceMat (Total AxB, Active CxD): {A}x{B}, {C}x{D}\n"
         
         if layout_config.get("tag_area_optimization_level") is not None:
             val = str(layout_config['tag_area_optimization_level']).lower()
             val = "latency" if "latency" in val else ("area" if "area" in val else layout_config['tag_area_optimization_level'])
             cfg_content += f"-TagBufferDesignOptimization: {val}\n"
         if layout_config.get("tag_local_wire_type") is not None:
-            cfg_content += f"-TagLocalWireType: {layout_config['tag_local_wire_type'].replace(' ', '')}\n"
+            cfg_content += f"-TagLocalWireType: {_map_wire_type(layout_config['tag_local_wire_type'])}\n"
         if layout_config.get("tag_local_wire_repeater_type") is not None:
             cfg_content += f"-TagLocalWireRepeaterType: {_map_repeater(layout_config['tag_local_wire_repeater_type'])}\n"
         if layout_config.get("tag_local_wire_low_swing") is not None:
             cfg_content += f"-TagLocalWireUseLowSwing: {layout_config['tag_local_wire_low_swing']}\n"
         if layout_config.get("tag_global_wire_type") is not None:
-            cfg_content += f"-TagGlobalWireType: {layout_config['tag_global_wire_type'].replace(' ', '')}\n"
+            cfg_content += f"-TagGlobalWireType: {_map_wire_type(layout_config['tag_global_wire_type'])}\n"
         if layout_config.get("tag_global_wire_repeater_type") is not None:
             cfg_content += f"-TagGlobalWireRepeaterType: {_map_repeater(layout_config['tag_global_wire_repeater_type'])}\n"
         if layout_config.get("tag_global_wire_low_swing") is not None:
             cfg_content += f"-TagGlobalWireUseLowSwing: {layout_config['tag_global_wire_low_swing']}\n"
             
-        if layout_config.get("data_local_wire_type") is not None:
-            cfg_content += f"-LocalWireType: {layout_config['data_local_wire_type'].replace(' ', '')}\n"
         if layout_config.get("tag_mux_output_lev1") is not None:
             cfg_content += f"-ForceTagMuxOutputLev1: {int(layout_config['tag_mux_output_lev1'])}\n"
         if layout_config.get("tag_mux_output_lev2") is not None:
@@ -110,38 +123,38 @@ def _generate_destiny_configs(cell_file, cfg_file, cap_kb, ww, assoc, stack, tem
             cfg_content += f"-ForceTagMuxSenseAmp: {int(layout_config['tag_mux_sense_amp'])}\n"
         
         if layout_config.get("tag_num_row_mat") is not None and layout_config.get("tag_num_col_mat") is not None and not free_bank:
-            tc, tr = int(layout_config["tag_num_col_mat"]), int(layout_config["tag_num_row_mat"])
-            ac, ar = tc, tr
-            if layout_config.get("tag_num_active_mat_per_col") is not None:
-                ac = int(layout_config["tag_num_active_mat_per_col"])
-            if layout_config.get("tag_num_active_mat_per_row") is not None:
-                ar = int(layout_config["tag_num_active_mat_per_row"])
-            cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {tr}x{tc}, {ac}x{ar}\n"
+            A = int(layout_config["tag_num_row_mat"])
+            B = int(layout_config["tag_num_col_mat"])
+            C = int(layout_config.get("tag_num_active_mat_per_col", A))
+            D = int(layout_config.get("tag_num_active_mat_per_row", B))
+            A, B = max(A, C), max(B, D)
+            cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {A}x{B}, {C}x{D}\n"
         elif layout_config.get("tag_num_active_mat_per_col") is not None and layout_config.get("tag_num_active_mat_per_row") is not None and not free_bank:
-            c, r = int(layout_config["tag_num_active_mat_per_col"]), int(layout_config["tag_num_active_mat_per_row"])
-            cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
+            A = C = int(layout_config["tag_num_active_mat_per_col"])
+            B = D = int(layout_config["tag_num_active_mat_per_row"])
+            cfg_content += f"-ForceTagBank (Total AxB, Active CxD): {A}x{B}, {C}x{D}\n"
             
         if layout_config.get("tag_num_row_subarray") is not None and layout_config.get("tag_num_col_subarray") is not None and not free_mat:
-            tc, tr = int(layout_config["tag_num_col_subarray"]), int(layout_config["tag_num_row_subarray"])
-            ac, ar = tc, tr
-            if layout_config.get("tag_num_active_subarray_per_col") is not None:
-                ac = int(layout_config["tag_num_active_subarray_per_col"])
-            if layout_config.get("tag_num_active_subarray_per_row") is not None:
-                ar = int(layout_config["tag_num_active_subarray_per_row"])
-            cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {tr}x{tc}, {ac}x{ar}\n"
+            A = int(layout_config["tag_num_row_subarray"])
+            B = int(layout_config["tag_num_col_subarray"])
+            C = int(layout_config.get("tag_num_active_subarray_per_col", A))
+            D = int(layout_config.get("tag_num_active_subarray_per_row", B))
+            A, B = max(A, C), max(B, D)
+            cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {A}x{B}, {C}x{D}\n"
         elif layout_config.get("tag_num_active_subarray_per_col") is not None and layout_config.get("tag_num_active_subarray_per_row") is not None and not free_mat:
-            c, r = int(layout_config["tag_num_active_subarray_per_col"]), int(layout_config["tag_num_active_subarray_per_row"])
-            cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {c}x{r}, {c}x{r}\n"
+            A = C = int(layout_config["tag_num_active_subarray_per_col"])
+            B = D = int(layout_config["tag_num_active_subarray_per_row"])
+            cfg_content += f"-ForceTagMat (Total AxB, Active CxD): {A}x{B}, {C}x{D}\n"
 
         # Array wiring configurations
         if layout_config.get("data_local_wire_type") is not None:
-            cfg_content += f"-LocalWireType: {layout_config['data_local_wire_type'].replace(' ', '')}\n"
+            cfg_content += f"-LocalWireType: {_map_wire_type(layout_config['data_local_wire_type'])}\n"
         if layout_config.get("data_local_wire_repeater_type") is not None:
             cfg_content += f"-LocalWireRepeaterType: {_map_repeater(layout_config['data_local_wire_repeater_type'])}\n"
         if layout_config.get("data_local_wire_low_swing") is not None:
             cfg_content += f"-LocalWireUseLowSwing: {layout_config['data_local_wire_low_swing']}\n"
         if layout_config.get("data_global_wire_type") is not None:
-            cfg_content += f"-GlobalWireType: {layout_config['data_global_wire_type'].replace(' ', '')}\n"
+            cfg_content += f"-GlobalWireType: {_map_wire_type(layout_config['data_global_wire_type'])}\n"
         if layout_config.get("data_global_wire_repeater_type") is not None:
             cfg_content += f"-GlobalWireRepeaterType: {_map_repeater(layout_config['data_global_wire_repeater_type'])}\n"
         if layout_config.get("data_global_wire_low_swing") is not None:
@@ -366,6 +379,8 @@ def _load_and_filter_data(args, data_csv):
         (ppa_df["cache_write_energy_nJ"]  < 1000) & (ppa_df["cache_leakage_mW"] > 0) &
         (ppa_df["cache_leakage_mW"] < 1e7)
     ]
+    if getattr(args, "capacity_kb", None) is not None:
+        ppa_df = ppa_df[ppa_df["capacity_kb"] == args.capacity_kb]
     # Positivity filter only applies to metrics that are physically non-zero for this tech.
     active = set(get_active_targets(args.tech))
     for m in args.metrics:
@@ -759,6 +774,7 @@ def main():
     p.add_argument("--destiny-timeout", type=int, default=600, help="TIMEOUT for physical compilation subprocesses")
     p.add_argument("--output-dir", default="benchmark_results")
     p.add_argument("--max-targets", type=int, default=5, help="Maximum index constraints to evaluate from library")
+    p.add_argument("--capacity-kb", type=float, default=None, help="Filter the target vectors to a specific capacity (in KB)")
     p.add_argument("--verbose-destiny", action="store_true", help="Print compiler outputs directly to console")
     p.add_argument("--verbose-opt", action="store_true", help="Print tabular design updates during steps")
     args = p.parse_args()
@@ -767,7 +783,7 @@ def main():
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     work_dir = os.path.join(args.output_dir, "destiny_files", timestamp)
-    plots_dir = os.path.join(args.output_dir, "validation_plots")
+    plots_dir = os.path.join(args.output_dir, "validation_plots", timestamp)
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(work_dir, exist_ok=True)

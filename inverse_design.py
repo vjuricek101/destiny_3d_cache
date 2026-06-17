@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from train_model import PPA_MLP
 import sys
+import math
 from destiny_utils import (
     TARGET_COLS as TARGET_KEYS,
     TARGET_SHORT_LABELS,
@@ -22,10 +23,12 @@ from destiny_utils import (
     _MUX_VALID,
     _MAT_VALID,
 )
+from inverse_physics_validity import (
+    compute_physics_penalties,
+    check_post_snap_partition
+)
 
 # -- Module-level helpers ------------------------------------------------------
-
-
 
 def _update_sram_cell_features(x, dyn_idx, log_vals, opt_cols, fixed_context, device):
     """Compute SRAM cell derived features and write them into feature vector x (in-place).
@@ -87,60 +90,6 @@ def _snap_design(opt_cols, final_log_vals, log10_cols, log2_cols, linear_cols):
             design[col] = int(round(lv)) if col in DATA_PARAM_BOUNDS_LINEAR else float(round(lv, 2))
     return design
 
-
-def _rows_per_subarray_penalty(log_vals, opt_cols, cap_log10, ww_log2):
-    """Differentiable physics penalty enforcing the data-array rows-per-subarray identity.
-
-    DESTINY requires (BankWithoutHtree.cpp:113, BankWithHtree.cpp:381):
-        rows_per_subarray = (cap_bytes * 8) / (assoc * wordWidth * numActiveMatPerCol * numActiveSubarrayPerCol)
-
-    In log2-space this is:
-        log2_rps = log2(cap_bits) - log2(assoc) - log2(ww) - log2(nmac_col) - log2(nsac_col)
-
-    Two soft sub-penalties are summed (caller applies a scalar weight):
-        relu(-log2_rps)                               -- negativity: not enough rows
-        (log2_rps - round(log2_rps).detach())^2      -- divisibility: non-integer log2
-
-    Parameters
-    ----------
-    log_vals  : 1-D Tensor of mapped optimizer values (log10/log2/linear per column type)
-    opt_cols  : list[str] in the same order as log_vals
-    cap_log10 : scalar Tensor, log10(capacity_kb)
-    ww_log2   : scalar Tensor, log2(word_width_bits)
-    """
-    # cap_bits = cap_kb * 8192 = cap_kb * 2^13
-    # log2(cap_bits) = log2(cap_kb) + 13 = cap_log10 * log2(10) + 13
-    LOG2_10 = 3.321928094887362
-    log2_cap_bits = cap_log10 * LOG2_10 + 13.0
-
-    def _get_log2(col, default_log2=0.0):
-        """Return the log2-space entry for a log2-encoded column, else a scalar constant."""
-        if col in opt_cols:
-            return log_vals[opt_cols.index(col)]
-        # Produce a zero-gradient constant on the same device as cap_log10
-        return cap_log10.new_zeros(1).squeeze() + default_log2
-
-    log2_assoc   = _get_log2("associativity", 2.0)           # default: log2(4)
-    log2_nac_col = _get_log2("data_num_active_mat_per_col", 0.0)  # log2 space, default: log2(1)
-
-    # data_num_active_subarray_per_col lives in LINEAR space [1, 2]; convert to log2
-    if "data_num_active_subarray_per_col" in opt_cols:
-        nsac_lin  = log_vals[opt_cols.index("data_num_active_subarray_per_col")]
-        log2_nsac = torch.log2(nsac_lin.clamp(min=1.0))
-    else:
-        log2_nsac = cap_log10.new_zeros(1).squeeze()  # log2(1) = 0
-
-    log2_rps = log2_cap_bits - log2_assoc - ww_log2 - log2_nac_col - log2_nsac
-
-    # Penalty 1: rows_per_subarray must be >= 1
-    neg_penalty = torch.relu(-log2_rps)
-
-    # Penalty 2: log2(rows) must be a non-negative integer (power of two)
-    # Detach the rounded value so gradient flows through log2_rps, not through round()
-    frac = log2_rps - torch.round(log2_rps.detach())
-    int_penalty = frac ** 2
-
-    return neg_penalty + int_penalty
 
 
 # -- Optimizer -----------------------------------------------------------------
@@ -302,8 +251,9 @@ class InverseOptimizer:
                 x_scaled = ((x - self.means) / self.stds).unsqueeze(0)
                 pred, p_feas    = self.model.forward_with_feasibility(x_scaled)
                 learned_penalty = 50.0 * (1.0 - p_feas.squeeze())
-                # Physics: penalise designs where rows_per_subarray is not a positive power-of-two
-                physics_penalty = 20.0 * _rows_per_subarray_penalty(log_vals, self.opt_cols, cap_log10, ww_log2)
+                
+                encoded_vals_dict = {col: log_vals[self.opt_cols.index(col)] for col in self.opt_cols}
+                physics_penalty = compute_physics_penalties(encoded_vals_dict, fixed_context, cap_log10, self.device)
 
                 loss    = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty + physics_penalty
                 barrier = (torch.relu(-params) ** 2).sum() + (torch.relu(params - 1.0) ** 2).sum()
@@ -351,6 +301,8 @@ class InverseOptimizer:
             for k, v in fixed_context.items():
                 if k not in self.opt_cols:
                     design[k] = v
+            
+            check_post_snap_partition(design, fixed_context)
 
             # Always compute pre-snap (continuous) physical values for CSV export
             pre_snap = {}

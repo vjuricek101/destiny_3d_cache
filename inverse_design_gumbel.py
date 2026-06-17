@@ -41,6 +41,10 @@ from destiny_utils import (
     SRAM_CELL_BOUNDS_LOG10,
     SRAM_CELL_BOUNDS_LINEAR,
 )
+from inverse_physics_validity import (
+    compute_physics_penalties,
+    check_post_snap_partition
+)
 
 # ── Gumbel hyper-parameters ───────────────────────────────────────────────────
 GUMBEL_TAU_START = 5.0   # hot  → broad distribution, low gradient variance
@@ -403,49 +407,9 @@ class InverseOptimizerGumbel:
                 pred, p_feas    = self.model.forward_with_feasibility(x_scaled)
                 learned_penalty = 50.0 * (1.0 - p_feas.squeeze())
 
-                # ── DESTINY partition constraint penalty ──────────────────────────────────────
-                # Enforces: word_width >= mat_r * mat_c * sub_r * sub_c
-                # From DESTINY main.cpp: blockSize / (active_partition_product) == 0
-                # causes every candidate config to be silently skipped (numSolutions = 0).
-                #
-                # Encoding conventions in encoded_vals_dict:
-                #   word_width_bits, data_num_active_mat_per_row/col  → log2-encoded
-                #   data_num_active_subarray_per_row/col              → linear (vocab = {1.0, 2.0})
-                #
-                # We convert everything to physical linear space for the penalty so the
-                # gradient is directly interpretable and avoids log2 singularities.
+                physics_penalty = compute_physics_penalties(encoded_vals_dict, fixed_context, cap_enc, self.device)
 
-                _ww_enc = encoded_vals_dict.get(
-                    "word_width_bits",
-                    torch.tensor(math.log2(float(fixed_context.get("word_width_bits", 64))),
-                                device=self.device)
-                )
-                _mat_r_enc = encoded_vals_dict.get(
-                    "data_num_active_mat_per_row",
-                    torch.tensor(0.0, device=self.device)   # log2(1) = 0 → physical default = 1
-                )
-                _mat_c_enc = encoded_vals_dict.get(
-                    "data_num_active_mat_per_col",
-                    torch.tensor(0.0, device=self.device)   # log2(1) = 0 → physical default = 1
-                )
-                # Subarray terms: linear vocab {1.0, 2.0}, already physical
-                _sub_r_phys = encoded_vals_dict.get(
-                    "data_num_active_subarray_per_row",
-                    torch.tensor(1.0, device=self.device)
-                )
-                _sub_c_phys = encoded_vals_dict.get(
-                    "data_num_active_subarray_per_col",
-                    torch.tensor(1.0, device=self.device)
-                )
-
-                _ww_phys        = 2.0 ** _ww_enc
-                _mat_r_phys     = 2.0 ** _mat_r_enc
-                _mat_c_phys     = 2.0 ** _mat_c_enc
-                _partition_phys = _mat_r_phys * _mat_c_phys * _sub_r_phys * _sub_c_phys
-                
-                partition_penalty = 50.0 * torch.relu(_partition_phys - _ww_phys) / _ww_phys
-
-                loss = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty + partition_penalty
+                loss = (w_tensor * (pred - t_tensor) ** 2).sum() + learned_penalty + physics_penalty
                 loss.backward()
                 inner_opt.step()
 
@@ -490,25 +454,7 @@ class InverseOptimizerGumbel:
                 if k not in self.opt_cols:
                     design[k] = v
 
-            # ── Post-snap partition constraint check ──────────────────────────────────────
-            # Mirrors DESTINY main.cpp: blockSize / (active_mat_row * active_mat_col *
-            # active_sub_row * active_sub_col) == 0 causes silent discard of all configs.
-            # For normal/sequential cache access mode, blockSize == word_width_bits.
-            _ps_ww    = int(design.get("word_width_bits",
-                                        fixed_context.get("word_width_bits", 64)))
-            _ps_mat_r = int(design.get("data_num_active_mat_per_row", 1))
-            _ps_mat_c = int(design.get("data_num_active_mat_per_col", 1))
-            _ps_sub_r = int(design.get("data_num_active_subarray_per_row", 1))
-            _ps_sub_c = int(design.get("data_num_active_subarray_per_col", 1))
-            _ps_partition = _ps_mat_r * _ps_mat_c * _ps_sub_r * _ps_sub_c
-
-            if _ps_partition > _ps_ww:
-                print(
-                    f"  [warn] Post-snap partition constraint violated: "
-                    f"word_width={_ps_ww} < partition_product={_ps_partition} "
-                    f"(mat_r={_ps_mat_r}, mat_c={_ps_mat_c}, "
-                    f"sub_r={_ps_sub_r}, sub_c={_ps_sub_c}). "     
-                )
+            check_post_snap_partition(design, fixed_context)
 
             # Pre-snap: physical values decoded from argmax vocab entries.
             # For Gumbel, argmax is already the discrete selection, so pre_snap == post_snap
