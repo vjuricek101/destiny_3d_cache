@@ -514,3 +514,58 @@ def derive_sram_physical_params(params: Dict[str, Any], node: int) -> Dict[str, 
     v_sense = 6.0 * _A_VTH.get(node, 3.0) / math.sqrt(2.0 * w_pg)
     params["MinSenseVoltage (mV)"] = round(max(5.0, min(80.0, v_sense)), 4)
     return params
+
+
+def setup_opt_dirs(base_dir_name: str, run_id: Optional[str] = None) -> Tuple[str, str, str]:
+    """Sets up directory structure for optimization runs:
+      {base_dir_name}/
+      {base_dir_name}/destiny_files/{run_id}/
+      {base_dir_name}/plots/{run_id}/
+
+    Returns
+    -------
+    base_dir : str
+        Path to base run directory: {base_dir_name}/
+    destiny_files_dir : str
+        Path to destiny files: {base_dir_name}/destiny_files/{run_id}/
+    plots_dir : str
+        Path to plots: {base_dir_name}/plots/{run_id}/
+    """
+    if not run_id:
+        import datetime
+        run_id = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    destiny_files_dir = os.path.join(base_dir_name, "destiny_files", run_id)
+    plots_dir = os.path.join(base_dir_name, "plots", run_id)
+    
+    os.makedirs(destiny_files_dir, exist_ok=True)
+    os.makedirs(plots_dir, exist_ok=True)
+    
+    return base_dir_name, destiny_files_dir, plots_dir
+
+
+def validate_cache_geometry(capacity_kb: float, associativity: int, word_width_bits: Optional[int] = None) -> None:
+    """Validates if the combination of cache capacity, associativity, and word width is physically consistent.
+    Enforces: capacity_bits >= associativity * word_width_bits
+    """
+    capacity_bits = capacity_kb * 1024.0 * 8.0
+    if word_width_bits is not None:
+        required_bits = float(associativity * word_width_bits)
+        if capacity_bits < required_bits:
+            raise ValueError(
+                f"Physically inconsistent cache geometry: capacity_kb={capacity_kb} ({int(capacity_bits)} bits) "
+                f"is too small for associativity={associativity} and word_width_bits={word_width_bits} "
+                f"(requires at least {int(required_bits)} bits, i.e., capacity_kb >= {required_bits / 8192.0:.3f} KB)."
+            )
+    else:
+        # Minimum word width in vocabulary is 64 bits.
+        required_bits = float(associativity * 64)
+        if capacity_bits < required_bits:
+            raise ValueError(
+                f"Physically inconsistent cache geometry: capacity_kb={capacity_kb} ({int(capacity_bits)} bits) "
+                f"is too small for associativity={associativity} (minimum required bits = {int(required_bits)} "
+                f"for word_width_bits=64, i.e., capacity_kb >= {required_bits / 8192.0:.3f} KB)."
+            )
+
+
+

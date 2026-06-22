@@ -175,8 +175,17 @@ def compute_physics_penalties(encoded_vals_dict, fixed_context, cap_enc, device)
     # The Tag array does not divide numRow by active subarrays in Mat.cpp.
     # So capacity_calculated diverges if total_subarrays != active_subarrays.
     tag_sub_active_vs_total_penalty = 100.0 * torch.relu(_tag_sub_r_log2 - _tag_sub_r_active_log2) + 100.0 * torch.relu(_tag_sub_c_log2 - _tag_sub_c_active_log2)
+
+    # 6. Tag H-tree Depth Constraint
+    # DESTINY BankWithHtree.cpp sets numDataDistributeBit = assoc (number of ways to route).
+    # It halves this count at every horizontal H-tree column level as it descends:
+    #   level 0 (bank):  assoc / 2^log2(tag_bank_col_active)
+    #   level 1 (mat):   ... / 2^log2(tag_sub_row_active)
+    # If total horizontal levels > log2(assoc), ways_per_leaf < 1 -> mat declared invalid.
+    # Constraint in log2-space: _tag_mat_r_enc + _tag_sub_r_active_log2 <= _assoc_enc
+    tag_htree_depth_penalty = 100.0 * torch.relu(_tag_mat_r_enc + _tag_sub_r_active_log2 - _assoc_enc)
     
-    return partition_penalty + rows_penalty + active_vs_total_penalty + tag_active_vs_total_penalty + tag_partition_penalty + data_cap_div_penalty + tag_cap_div_penalty + data_ww_div_penalty + tag_ww_div_penalty + tag_assoc_div_penalty + data_addr_penalty + tag_addr_penalty + tag_sub_active_vs_total_penalty
+    return partition_penalty + rows_penalty + active_vs_total_penalty + tag_active_vs_total_penalty + tag_partition_penalty + data_cap_div_penalty + tag_cap_div_penalty + data_ww_div_penalty + tag_ww_div_penalty + tag_assoc_div_penalty + data_addr_penalty + tag_addr_penalty + tag_sub_active_vs_total_penalty + tag_htree_depth_penalty
 
 
 def check_post_snap_partition(design, fixed_context):
