@@ -361,14 +361,14 @@ def execute_simulations(simulation_args: List[tuple], label: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--type", type=str, default="ALL", help="Memory type: SRAM, RRAM, eDRAM, ALL")
+    parser.add_argument("--tech", type=str, default="ALL", help="Memory technology: SRAM, RRAM, eDRAM, ALL")
     args = parser.parse_args()
 
 
-    mem_types = ["SRAM", "RRAM", "eDRAM"] if args.type.upper() == "ALL" else [args.type.upper()]
+    mem_techs = ["SRAM", "RRAM", "eDRAM"] if args.tech.upper() == "ALL" else [args.tech.upper()]
     all_args = []
-    for mt in mem_types:
+    for mt in mem_techs:
         all_args.extend(collect_simulations(mt))
     
-    if all_args: execute_simulations(all_args, args.type.upper())
+    if all_args: execute_simulations(all_args, args.tech.upper())
     print("\nExploration Sweep Done.")

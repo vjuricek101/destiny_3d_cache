@@ -2,10 +2,7 @@ import torch
 import math
 
 def calculate_divisibility_penalty(num_log2, den_log2):
-    """
-    Differentiable penalty enforcing that 2^num_log2 is perfectly divisible by 2^den_log2.
-    Requires num_log2 - den_log2 >= 0, and num_log2 - den_log2 is an integer.
-    """
+    """Differentiable penalty enforcing that 2^num_log2 is divisible by 2^den_log2."""
     diff = num_log2 - den_log2
     neg_penalty = torch.relu(-diff)
     frac = diff - torch.round(diff.detach())
@@ -13,19 +10,7 @@ def calculate_divisibility_penalty(num_log2, den_log2):
     return neg_penalty + int_penalty
 
 def calculate_rows_per_subarray_penalty(cap_log10, ww_log2, assoc_log2, mat_c_log2, sub_c_log2):
-    """
-    Differentiable physics penalty enforcing the data-array rows-per-subarray identity.
-
-    DESTINY requires (BankWithoutHtree.cpp:113, BankWithHtree.cpp:381):
-        rows_per_subarray = (cap_bytes * 8) / (assoc * wordWidth * numActiveMatPerCol * numActiveSubarrayPerCol)
-
-    In log2-space this is:
-        log2_rps = log2(cap_bits) - log2(assoc) - log2(ww) - log2(nmac_col) - log2(nsac_col)
-
-    Two soft sub-penalties are summed (caller applies a scalar weight):
-        relu(-log2_rps)                               -- negativity: not enough rows
-        (log2_rps - round(log2_rps).detach())^2      -- divisibility: non-integer log2
-    """
+    """Differentiable penalty enforcing data-array rows-per-subarray constraints."""
     LOG2_10 = 3.321928094887362
     log2_cap_bits = cap_log10 * LOG2_10 + 13.0
     log2_rps = log2_cap_bits - assoc_log2 - ww_log2 - mat_c_log2 - sub_c_log2
@@ -108,17 +93,30 @@ def compute_physics_penalties(encoded_vals_dict, fixed_context, cap_enc, device)
     _tag_mat_r_phys = 2.0 ** _tag_mat_r_enc
     _tag_mat_c_phys = 2.0 ** _tag_mat_c_enc
     
-    # Tag approx word width log2 (DESTINY usually has ~30-34 bit tag width for typical caches)
-    # 32 bits = log2(32) = 5.0
-    _tag_ww_enc = torch.tensor(5.0, device=device)
-    
-    # Approximate tag word width for partition penalty
-    tag_partition_penalty = 50.0 * calculate_partition_penalty(2.0 ** _tag_ww_enc, _tag_mat_r_phys, _tag_mat_c_phys, _tag_sub_r_phys, _tag_sub_c_phys)
-
     _assoc_enc = encoded_vals_dict.get(
         "associativity", 
         torch.tensor(math.log2(float(fixed_context.get("associativity", 4))), device=device)
     )
+
+    # Derived Tag Word Width:
+    # In DESTINY, the tag word width (tag block size) is calculated as:
+    #   tag_ww = TOTAL_ADDRESS_BIT - numIndexBit - numOffsetBit + 2 (valid + dirty bits)
+    # where:
+    #   TOTAL_ADDRESS_BIT = 48 (constant.h)
+    #   numIndexBit = log2(capacity_bytes * 8 / (word_width_bits * assoc))
+    #   numOffsetBit = log2(word_width_bits / 8)
+    # Summing them cancels the data word_width:
+    #   numIndexBit + numOffsetBit = log2(capacity_bytes / assoc)
+    # Thus:
+    #   tag_ww = 50 - log2(capacity_bytes / assoc)
+    #          = 40 - log2(capacity_kb) + log2(assoc)
+    LOG2_10 = 3.321928094887362
+    log2_cap_kb = cap_enc * LOG2_10
+    _tag_ww_enc = torch.clamp(40.0 - log2_cap_kb + _assoc_enc, min=1.0)
+    
+    # Tag partition penalty
+    tag_partition_penalty = 50.0 * calculate_partition_penalty(2.0 ** _tag_ww_enc, _tag_mat_r_phys, _tag_mat_c_phys, _tag_sub_r_phys, _tag_sub_c_phys)
+
     _sub_r_log2 = torch.log2(_sub_r_phys)
     _sub_c_log2 = torch.log2(_sub_c_phys)
     _tag_sub_r_log2 = torch.log2(_tag_sub_r_phys)
@@ -215,12 +213,18 @@ def check_post_snap_partition(design, fixed_context):
     tag_sub_r = int(design.get("tag_num_active_subarray_per_row", 1))
     tag_sub_c = int(design.get("tag_num_active_subarray_per_col", 1))
     tag_partition = tag_mat_r * tag_mat_c * tag_sub_r * tag_sub_c
-    tag_ww = 32
+
+    # Calculate exact physical tag word width for warning checks:
+    # tag_ww = 40 - log2(capacity_kb) + log2(assoc)
+    capacity_kb = float(design.get("capacity_kb", fixed_context.get("capacity_kb", 64.0)))
+    assoc = int(design.get("associativity", fixed_context.get("associativity", 4)))
+    tag_ww = int(round(40.0 - math.log2(capacity_kb) + math.log2(assoc)))
+    tag_ww = max(2, tag_ww)  # clamp to minimum of 2 bits
 
     if tag_partition > tag_ww:
         print(
             f"  [warn] Post-snap TAG partition constraint violated: "
-            f"approx_tag_width={tag_ww} < tag_partition_product={tag_partition} "
+            f"derived_tag_width={tag_ww} < tag_partition_product={tag_partition} "
         )
         
     assoc = int(design.get("associativity", fixed_context.get("associativity", 4)))

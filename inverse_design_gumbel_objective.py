@@ -1,18 +1,6 @@
 #!/usr/bin/env python3
 """
 inverse_design_gumbel_objective.py — ST Gumbel-Softmax inverse design optimizer directly minimizing objectives.
-
-Each architectural parameter is a categorical variable over an explicit discrete
-vocabulary.  During the inner loop:
-  1. Sample Gumbel noise:  g = -log(-log(U + ε) + ε),  U ~ Uniform(0,1)
-  2. Compute soft Gumbel-Softmax relaxation:  y = softmax((logits + g) / τ)
-  3. Apply the Straight-Through trick (Jang et al., ICLR 2017):
-       y_hard = one_hot(argmax(y))
-       y_st   = (y_hard - y).detach() + y
-  4. Scalar value fed to the surrogate = inner product of y_st and the vocab tensor.
-
-Temperature τ is annealed exponentially from GUMBEL_TAU_START → GUMBEL_TAU_END
-so the distribution hardens progressively over optimization steps.
 """
 
 import math
@@ -56,16 +44,7 @@ GUMBEL_TAU_END   = 0.5   # cold → near-discrete, higher variance
 # ── Core Gumbel-Softmax primitive ─────────────────────────────────────────────
 
 def gumbel_softmax_st(logits: torch.Tensor, tau: float):
-    """Straight-Through Gumbel-Softmax sample (Jang et al., ICLR 2017, Eqs. 1–4).
-
-    Forward : hard one-hot via argmax.
-    Backward: gradients flow through the soft Gumbel-Softmax relaxation y.
-
-    Returns
-    -------
-    y_st : shape [K] — STE one-hot with gradient w.r.t. logits
-    y    : shape [K] — soft sample (for gradient computation only)
-    """
+    """Differentiable Straight-Through Gumbel-Softmax sample (forward=hard, backward=soft)."""
     eps = 1e-20
     u   = torch.rand_like(logits)
     g   = -torch.log(-torch.log(u + eps) + eps)            # Gumbel(0,1) noise
@@ -87,11 +66,7 @@ def _anneal_tau(step: int, total_steps: int) -> float:
 
 
 def _update_sram_cell_features(x, dyn_idx, encoded_vals_dict, fixed_context, device):
-    """Compute SRAM cell derived features and write them into feature vector x (in-place).
-
-    encoded_vals_dict holds differentiable scalar tensors (inner products of y_st and
-    their vocab tensors), so autograd graphs remain intact back to logits.
-    """
+    """Compute and write SRAM cell area and sense voltage features in-place (autograd compatible)."""
     wn  = 10 ** encoded_vals_dict["CellInput_SRAMCellNMOSWidth (F)"]
     wp  = 10 ** encoded_vals_dict["CellInput_SRAMCellPMOSWidth (F)"]
     wac = 10 ** encoded_vals_dict["CellInput_AccessCMOSWidth (F)"]
@@ -122,7 +97,7 @@ def _update_sram_cell_features(x, dyn_idx, encoded_vals_dict, fixed_context, dev
 
 
 def _snap_design_gumbel(vocabs: dict, logits_dict: dict) -> dict:
-    """Convert final logits to physical design values via argmax over each vocabulary."""
+    """Argmax logits and decode categorical parameters to physical units."""
     design = {}
     for col, logit in logits_dict.items():
         best_idx = int(logit.detach().argmax().item())
@@ -149,8 +124,7 @@ def _snap_design_gumbel(vocabs: dict, logits_dict: dict) -> dict:
 # ── Optimizer ─────────────────────────────────────────────────────────────────
 
 class InverseOptimizerGumbel:
-    """Inverse design optimizer using Straight-Through Gumbel-Softmax to directly minimize PPA objectives.
-    """
+    """Inverse design optimizer using Straight-Through Gumbel-Softmax to directly minimize PPA objectives."""
 
     def __init__(self, tech: str):
         self.tech   = tech
@@ -182,7 +156,6 @@ class InverseOptimizerGumbel:
         self._all_opt_cols    = []
         self._all_log10_cols  = []
         self._all_log2_cols   = []
-        self._all_linear_cols = []
 
         for col, _ in zip(BASE_ARCH_COLS, BASE_ARCH_BOUNDS):
             if col in self.feature_cols:
@@ -197,7 +170,6 @@ class InverseOptimizerGumbel:
         for col in DATA_PARAM_BOUNDS_LINEAR:
             if col in self.feature_cols:
                 self._all_opt_cols.append(col)
-                self._all_linear_cols.append(col)
 
         if self.tech == "SRAM":
             for col in SRAM_CELL_BOUNDS_LOG10:
@@ -207,7 +179,6 @@ class InverseOptimizerGumbel:
             for col in SRAM_CELL_BOUNDS_LINEAR:
                 if col in self.feature_cols:
                     self._all_opt_cols.append(col)
-                    self._all_linear_cols.append(col)
 
         self.categorical_vocabs = {}
         for cat in CATEGORICAL_COLS:
@@ -222,7 +193,7 @@ class InverseOptimizerGumbel:
                 self.categorical_vocabs[cat] = vals
 
     def _objective_mask(self, objectives: list):
-        """Return a binary weight mask aligned to the active keys of the model output head."""
+        """Return a binary weight mask aligned to the active keys."""
         if not objectives or "all" in objectives or objectives == ["all"]:
             resolved = set(self._active_keys)
         else:
@@ -244,12 +215,11 @@ class InverseOptimizerGumbel:
         base_x: torch.Tensor,
         dyn_idx: dict,
         encoded_vals_dict: dict,
-        opt_cols: list,
         fixed_context: dict,
         cap_enc: torch.Tensor,
         cat_encoded_dict: dict = None,
     ) -> torch.Tensor:
-        """Construct the full feature vector for the surrogate model."""
+        """Construct the complete surrogate input feature vector with dynamic and derived features."""
         x = base_x.clone()
 
         for col, enc_val in encoded_vals_dict.items():
@@ -301,30 +271,12 @@ class InverseOptimizerGumbel:
         objective_weights=None,
         verbose: bool = False,
     ):
-        """ST Gumbel-Softmax gradient-based inverse design directly minimizing objectives.
-
-        Parameters
-        ----------
-        objectives        : list of metrics (column names or short labels) to minimize
-        fixed_context     : {col: value} — columns pinned and not optimised
-        steps             : gradient steps per restart
-        n_restarts        : number of random restarts
-        objective_weights : optional override for per-metric loss weights
-        verbose           : if True, print per-parameter table at the end
-
-        Returns
-        -------
-        design           : {col: physical_value} — snapped hardware design
-        ppa_dict         : {label: predicted_value} — continuous-param PPA
-        pre_snap         : {col: pre-snap physical value}
-        snapped_ppa_dict : {label: predicted_value} — post-snap PPA
-        """
+        """ST Gumbel-Softmax gradient-based inverse design directly minimizing objectives."""
         # Drop columns pinned by fixed_context.
         fixed_keys       = set(fixed_context.keys())
         self.opt_cols    = [c for c in self._all_opt_cols    if c not in fixed_keys]
         self.log10_cols  = [c for c in self._all_log10_cols  if c not in fixed_keys]
         self.log2_cols   = [c for c in self._all_log2_cols   if c not in fixed_keys]
-        self.linear_cols = [c for c in self._all_linear_cols if c not in fixed_keys]
         self.opt_cats    = [c for c in self.categorical_vocabs if c not in fixed_keys]
 
         vocabs = {k: v.to(self.device) for k, v in build_gumbel_vocabs(self.opt_cols, self.tech).items()}
@@ -407,7 +359,7 @@ class InverseOptimizerGumbel:
 
                 cap_enc = _cap_enc_fixed if _cap_fixed else encoded_vals_dict["capacity_kb"]
                 x       = self._build_feature_vector(
-                    base_x, dyn_idx, encoded_vals_dict, self.opt_cols, fixed_context, cap_enc, cat_encoded_dict
+                    base_x, dyn_idx, encoded_vals_dict, fixed_context, cap_enc, cat_encoded_dict
                 )
 
                 x_scaled = ((x - self.means) / self.stds).unsqueeze(0)
@@ -494,7 +446,7 @@ class InverseOptimizerGumbel:
             
             cap_enc_snap = _cap_enc_fixed if _cap_fixed else snapped_encoded["capacity_kb"]
             x_snap       = self._build_feature_vector(
-                base_x, dyn_idx, snapped_encoded, self.opt_cols, fixed_context, cap_enc_snap, snapped_cat_encoded
+                base_x, dyn_idx, snapped_encoded, fixed_context, cap_enc_snap, snapped_cat_encoded
             )
             x_snap_scaled = ((x_snap - self.means) / self.stds).unsqueeze(0)
             pred_snap, _  = self.model.forward_with_feasibility(x_snap_scaled)

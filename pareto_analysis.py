@@ -157,12 +157,12 @@ def process_feasibility(tech, output_dir="pareto"):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Pareto analysis + feasibility dataset builder")
-    parser.add_argument("--type",        default="ALL", choices=["SRAM", "RRAM", "eDRAM", "ALL"])
+    parser.add_argument("--tech",        default="ALL", choices=["SRAM", "RRAM", "eDRAM", "ALL"])
     parser.add_argument("--only-full",   action="store_true", help="Skip Pareto filtering; write full_data CSV only")
     parser.add_argument("--output-dir",  default="pareto",    help="Root output directory (default: pareto/)")
     args = parser.parse_args()
 
-    techs = ["SRAM", "RRAM", "eDRAM"] if args.type == "ALL" else [args.type]
+    techs = ["SRAM", "RRAM", "eDRAM"] if args.tech == "ALL" else [args.tech]
 
     for t in techs:
         process_results(t, args.only_full)

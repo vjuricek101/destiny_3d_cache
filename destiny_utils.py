@@ -498,7 +498,7 @@ def power2_xticks(ax, caps):
 
 # -- SRAM Physics: layout-aware area (Base+Scaling) + Pelgrom mismatch sensing -
 
-_A_VTH: Dict[int, float] = {65: 5.0, 45: 4.0, 32: 3.0, 22: 2.5}  # A_Vth [mV.um]
+A_VTH_BY_NODE: Dict[int, float] = {65: 5.0, 45: 4.0, 32: 3.0, 22: 2.5}  # A_Vth [mV.um]
 
 def derive_sram_physical_params(params: Dict[str, Any], node: int) -> Dict[str, Any]:
     """Compute CellArea (F^2) and MinSenseVoltage (mV) from transistor widths."""
@@ -511,7 +511,7 @@ def derive_sram_physical_params(params: Dict[str, Any], node: int) -> Dict[str, 
     area = 55.0 + 30.0 * max(w_pd, w_pg) + 20.0 * (w_pu + 0.5)
     params["CellArea (F^2)"] = round(max(40.0, min(200.0, area)), 4)
     # Sensing: 6sigma Pelgrom mismatch at SA input (W_SA = 2xW_PG, L = 1F)
-    v_sense = 6.0 * _A_VTH.get(node, 3.0) / math.sqrt(2.0 * w_pg)
+    v_sense = 6.0 * A_VTH_BY_NODE.get(node, 3.0) / math.sqrt(2.0 * w_pg)
     params["MinSenseVoltage (mV)"] = round(max(5.0, min(80.0, v_sense)), 4)
     return params
 

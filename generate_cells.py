@@ -343,8 +343,8 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "--type", type=str, default="ALL",
-        help="Memory type to generate (SRAM, RRAM, eDRAM, or ALL)."
+        "--tech", type=str, default="ALL",
+        help="Memory technology to generate (SRAM, RRAM, eDRAM, or ALL)."
     )
     parser.add_argument(
         "--num_variants", type=int, default=2000,
@@ -354,11 +354,11 @@ def main():
 
     # No header print
 
-    selected_types = (
-        list(MEMORY_CONFIGS.keys()) if args.type.upper() == "ALL" else [args.type]
+    selected_techs = (
+        list(MEMORY_CONFIGS.keys()) if args.tech.upper() == "ALL" else [args.tech]
     )
 
-    for mem in selected_types:
+    for mem in selected_techs:
         generate_synthetic_cells(mem, args.num_variants)
 
     print("\nGeneration process complete.")

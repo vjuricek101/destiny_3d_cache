@@ -1,166 +1,135 @@
-# Makefile.exploration for parameterized DESTINY design space exploration
+# Makefile.exploration for DESTINY data exploration, surrogate training, and inverse design
 
-# --- Configuration ---
-# Mode: standard (mixed physics) or arch (fixed-physics architectural sweep)
-MODE ?= standard
-# Memory type: SRAM, RRAM, eDRAM, or ALL
-TYPE ?= ALL
-# Feasibility: yes or no (for two-head model)
-FEASIBILITY ?= no
-# Number of variants to generate per technology (only applies to standard mode)
-NUM_VARIANTS ?= 16000
-# Technologies handled by the ALL logic
+# --- Configuration Defaults ---
+TECH ?= SRAM
+NUM_VARIANTS ?= 2000
+TRIALS ?= 30
+STUDY_NAME ?= destiny_$(TECH)
+
+# Technologies supported for multi-tech pipeline
 TECHS = SRAM RRAM eDRAM
-# Optuna study name — shared between tune and train so best HPs are picked up
-ifeq ($(FEASIBILITY), yes)
-	STUDY_NAME ?= destiny_$(TYPE)$(SUFFIX)_feasibility
-else
-	STUDY_NAME ?= destiny_$(TYPE)$(SUFFIX)
-endif
 
-# --- Paths ---
-RAM_DIR = /dev/shm/vjuricek_destiny_tmp
+# --- Inverse Design Parameter Defaults ---
+INV_NODE ?= 32
+INV_ROADMAP ?= HP
+INV_OPT_STEPS_TARGET ?= 800
+INV_OPT_STEPS_OBJ ?= 500
+INV_MAX_TARGETS ?= 1
+INV_VALIDATE_TOP_TARGET ?= 1
+INV_VALIDATE_TOP_OBJ ?= 2
 
-# --- Script Logic (Switches based on MODE) ---
-ifeq ($(MODE), arch)
-	GENERATE_SCRIPT = generate_cells_arch.py
-	EXPLORE_SCRIPT  = run_exploration_arch.py
-	ANALYZE_SCRIPT  = pareto_analysis.py
-	TUNE_SCRIPT     = tune_model.py
-	PLOT_SCRIPT     = visualize_pareto_arch.py
-	TRAIN_SCRIPT    = train_model.py
-	INV_DESIGN_SCRIPT = inverse_design.py
-	SUFFIX = _arch
-	ARCH_FLAG = --arch
-	NUM_VAR_FLAG =
-else
-	GENERATE_SCRIPT = generate_cells.py
-	EXPLORE_SCRIPT  = run_exploration.py
-	ANALYZE_SCRIPT  = pareto_analysis.py
-	TUNE_SCRIPT     = tune_model.py
-	PLOT_SCRIPT     = visualize_pareto.py
-	TRAIN_SCRIPT    = train_model.py
-	INV_DESIGN_SCRIPT = inverse_design.py
-	SUFFIX =
-	ARCH_FLAG =
-	NUM_VAR_FLAG = --num_variants $(NUM_VARIANTS)
-endif
-
-ifeq ($(FEASIBILITY), yes)
-	FEAS_FLAG = --feasibility
-else
-	FEAS_FLAG =
-endif
-
-
-# --- Main Targets ---
-.PHONY: help all exploration generate explore analyze plot train ml_pipeline clean clean_studies clean_all
+.PHONY: help all data_exploration generate explore analyze plot ml_surrogate tune train inverse_design inverse_design_target inverse_design_objective end_to_end clean clean_models clean_opt clean_all
 
 help:
-	@echo "DESTINY Exploration Pipeline"
-	@echo "Usage: make -f Makefile.exploration [target] [MODE=standard|arch] [TYPE=SRAM|RRAM|eDRAM|ALL]"
-	@echo ""
-	@echo "Modes:"
-	@echo "  standard    Full-stack sweep (Arch + Physics), uses random sampling."
-	@echo "  arch        Architectural sweep (Fixed Physics), uses Cartesian grid."
+	@echo "DESTINY Exploration, Surrogate, and Inverse Design Pipeline"
+	@echo "============================================================"
+	@echo "Usage: make -f Makefile.exploration [target] [TECH=SRAM|RRAM|eDRAM|ALL]"
 	@echo ""
 	@echo "Main Targets:"
-	@echo "  all            Run everything: exploration, then ml_pipeline"
-	@echo "  exploration    Run generate -> explore -> analyze -> plot"
-	@echo "  ml_pipeline    Train and validate surrogate model(s)"
-	@echo "  clean_studies  Delete all Optuna tuning studies from the DB"
+	@echo "  data_exploration         Run cell generation, exploration simulation, Pareto analysis, and plot."
+	@echo "  ml_surrogate             Tune and train surrogate models (supports TECH=ALL or TECH=SRAM/RRAM/eDRAM)."
+	@echo "  inverse_design           Run inverse design target-matching and objective-minimization sweeps."
+	@echo "  inverse_design_target    Run inverse design target-matching sweep."
+	@echo "  inverse_design_objective Run inverse design objective-minimization sweep."
+	@echo "  end_to_end               Run the entire pipeline (data_exploration -> ml_surrogate -> inverse_design)."
 	@echo ""
+	@echo "Cleaning Targets:"
+	@echo "  clean                    Remove transient data files (synthetic cells, raw simulation results, Pareto)."
+	@echo "  clean_models             Remove models and Optuna tuning databases."
+	@echo "  clean_opt                Remove inverse design optimization output directories."
+	@echo "  clean_all                Remove all transient data, models, and optimization outputs."
 
-# Orchestration
-all: exploration ml_pipeline
-
-# --- Data Exploration Phase ---
-
-exploration: kill generate explore analyze plot
-
-kill:
-	@echo "--- Killing stale DESTINY and Python processes ---"
-	-pkill -9 -f $(EXPLORE_SCRIPT)
-	-pkill -9 -u $(shell whoami) destiny
-	@sleep 1
+# --- Data Exploration Target ---
+data_exploration: generate explore analyze plot
 
 generate:
-	@echo "--- Step 1: Generating cells (MODE=$(MODE), TYPE=$(TYPE)) ---"
-	python3 $(GENERATE_SCRIPT) --type $(TYPE) $(NUM_VAR_FLAG)
+	@echo "--- Step 1: Generating synthetic cells (TECH=$(TECH)) ---"
+	python3 generate_cells.py --tech $(TECH) --num_variants $(NUM_VARIANTS)
 
 explore:
-	@echo "--- Step 2: Running parallel simulations for $(TYPE)$(SUFFIX) ---"
-	python3 $(EXPLORE_SCRIPT) --type $(TYPE)
+	@echo "--- Step 2: Running parallel simulations (TECH=$(TECH)) ---"
+	python3 run_exploration.py --tech $(TECH)
 
 analyze:
-	@echo "--- Step 3: Performing Pareto analysis for $(TYPE)$(SUFFIX) ---"
-	python3 $(ANALYZE_SCRIPT) --type $(TYPE) $(ARCH_FLAG)
+	@echo "--- Step 3: Performing Pareto frontier and feasibility analysis (TECH=$(TECH)) ---"
+	python3 pareto_analysis.py --tech $(TECH)
 
 plot:
-	@echo "--- Step 4: Generating Pareto visualization for $(TYPE)$(SUFFIX) ---"
-	@if [ "$(MODE)" = "arch" ]; then \
-		if [ "$(TYPE)" = "ALL" ]; then \
-			for tech in $(TECHS); do python3 $(PLOT_SCRIPT) --tech $$tech; done \
-		else \
-			python3 $(PLOT_SCRIPT) --tech $(TYPE); \
-		fi \
-	else \
-		python3 $(PLOT_SCRIPT); \
-	fi
+	@echo "--- Step 4: Generating Pareto visualization ---"
+	python3 visualize_pareto.py --pareto pareto/pareto.csv
 
-# --- ML Surrogate Pipeline ---
-
-ml_pipeline:
-ifeq ($(TYPE), ALL)
+# --- ML Surrogate Target ---
+ml_surrogate:
+ifeq ($(TECH), ALL)
 	@for tech in $(TECHS); do \
-		echo "--- Running ML Pipeline for $$tech ($(MODE), FEASIBILITY=$(FEASIBILITY)) ---"; \
-		$(MAKE) -f Makefile.exploration tune train TYPE=$$tech MODE=$(MODE) FEASIBILITY=$(FEASIBILITY); \
+		echo "--- Running ML pipeline for $$tech ---"; \
+		$(MAKE) -f Makefile.exploration tune train TECH=$$tech STUDY_NAME=destiny_$$tech; \
 	done
 else
-	@$(MAKE) -f Makefile.exploration tune train TYPE=$(TYPE) MODE=$(MODE) FEASIBILITY=$(FEASIBILITY)
+	@$(MAKE) -f Makefile.exploration tune train TECH=$(TECH) STUDY_NAME=$(STUDY_NAME)
 endif
 
 tune:
-	@echo "--- Hyperparameter Tuning for $(TYPE)$(SUFFIX) (FEASIBILITY=$(FEASIBILITY), study: $(STUDY_NAME)) ---"
-	python3 $(TUNE_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) $(FEAS_FLAG) --study-name $(STUDY_NAME)
+	@echo "--- Hyperparameter Tuning for $(TECH) (study: $(STUDY_NAME)) ---"
+	python3 tune_model.py --tech $(TECH) --trials $(TRIALS) --study-name $(STUDY_NAME)
 
 train:
-	@echo "--- Training Surrogate Model for $(TYPE)$(SUFFIX) (FEASIBILITY=$(FEASIBILITY), from study: $(STUDY_NAME)) ---"
-	python3 $(TRAIN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG) $(FEAS_FLAG) --from-study $(STUDY_NAME) --eval-on-test
+	@echo "--- Training Surrogate Model for $(TECH) (from study: $(STUDY_NAME)) ---"
+	python3 train_model.py --tech $(TECH) --from-study $(STUDY_NAME) --eval-on-test
 
+# --- Inverse Design Target ---
+inverse_design: inverse_design_target inverse_design_objective
 
-design:
-	@echo "--- Running Inverse Design for $(TYPE)$(SUFFIX) ---"
-	python3 $(INV_DESIGN_SCRIPT) --tech $(TYPE) $(ARCH_FLAG)
+inverse_design_target:
+	@echo "--- Running Inverse Design (Target Sizing Sweep) ---"
+	python3 inverse_design_sweep_target.py \
+		--tech $(TECH) \
+		--node $(INV_NODE) \
+		--roadmap $(INV_ROADMAP) \
+		--max-targets $(INV_MAX_TARGETS) \
+		--validate-top $(INV_VALIDATE_TOP_TARGET) \
+		--opt-steps $(INV_OPT_STEPS_TARGET)
 
-# --- Cleaning ---
+inverse_design_objective:
+	@echo "--- Running Inverse Design (Objective Sizing Sweep) ---"
+	python3 inverse_design_sweep_objective.py \
+		--tech $(TECH) \
+		--node $(INV_NODE) \
+		--roadmap $(INV_ROADMAP) \
+		--targets cache_area_mm2 cache_hit_latency_ns \
+		--validate-top $(INV_VALIDATE_TOP_OBJ) \
+		--capacity-kb 2 \
+		--associativity 4 \
+		--opt-steps $(INV_OPT_STEPS_OBJ)
 
-clean_studies:
-	@echo "--- Deleting all Optuna tuning studies and clearing tuning artifacts ---"
-	@python3 -c "import optuna; \
-storage = 'sqlite:///optuna_study.db'; \
-summaries = optuna.get_all_study_summaries(storage=storage); \
-[optuna.delete_study(study_name=s.study_name, storage=storage) for s in summaries]; \
-print(f'Done. {len(summaries)} study/studies removed.')"
-	rm -rf model_output/tuning/
-
-clean:
-ifeq ($(TYPE), ALL)
-	@echo "--- Cleaning all data for $(TECHS) ($(MODE)) ---"
+# --- End to End Target ---
+end_to_end:
+	@echo "=========================================================="
+	@echo "  Starting End-to-End DESTINY Optimization & Sizing Pipeline"
+	@echo "=========================================================="
+	$(MAKE) -f Makefile.exploration data_exploration TECH=$(TECH)
+	$(MAKE) -f Makefile.exploration ml_surrogate TECH=$(TECH)
+ifeq ($(TECH), ALL)
 	@for tech in $(TECHS); do \
-		rm -rf $(RAM_DIR)/$$tech$(SUFFIX); \
-		rm -rf exploration_results/$$tech$(SUFFIX); \
-		rm -rf pareto/$$tech$(SUFFIX); \
-		rm -rf pareto/plots/$$tech$(SUFFIX); \
+		echo "--- Running Inverse Design for $$tech ---"; \
+		$(MAKE) -f Makefile.exploration inverse_design TECH=$$tech; \
 	done
 else
-	@echo "--- Cleaning data for $(TYPE) ($(MODE)) ---"
-	rm -rf $(RAM_DIR)/$(TYPE)$(SUFFIX)
-	rm -rf exploration_results/$(TYPE)$(SUFFIX)
-	rm -rf pareto/$(TYPE)$(SUFFIX)
-	rm -rf pareto/plots/$(TYPE)$(SUFFIX)
+	$(MAKE) -f Makefile.exploration inverse_design TECH=$(TECH)
 endif
 
-clean_all: clean_studies
-	@echo "Cleaning up ALL generated outputs across ALL modes..."
-	rm -rf synthetic_cells/ exploration_results/ pareto/ model_output/ $(RAM_DIR)/
+# --- Cleaning ---
+clean:
+	@echo "Cleaning transient data and run outputs..."
+	rm -rf synthetic_cells/ exploration_results/ failed_exploration/ pareto/
+
+clean_models:
+	@echo "Cleaning saved models and study databases..."
+	rm -rf model_output/ optuna_study.db
+
+clean_opt:
+	@echo "Cleaning inverse design optimization outputs..."
+	rm -rf opt_target/ opt_obj/
+
+clean_all: clean clean_models clean_opt
+	@echo "All generated outputs and models cleared."
